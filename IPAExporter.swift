@@ -99,91 +99,114 @@ func exportIPA() async throws -> String {
 extension View {
     /// Three-finger tap anywhere → IPA export sheet.
     func ipaExportOnTripleTap() -> some View {
-        self.modifier(IPAExportModifier())
+        modifier(IPAExportModifier())
     }
 }
 
-struct IPAExportModifier: ViewModifier {
+private struct IPAExportModifier: ViewModifier {
     @State private var showSheet = false
-    @State private var ipaFile: IPAFile?
-    @State private var isBuilding = false
-    @State private var errorMessage: String?
-
     func body(content: Content) -> some View {
         content
-            .onTapGesture(count: 3) {
-                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                showSheet = true
-                isBuilding = true
-                errorMessage = nil
-
-                Task {
-                    do {
-                        let path = try await exportIPA()
-                        let url = URL(fileURLWithPath: path)
-                        ipaFile = try IPAFile(ipaURL: url)
-                    } catch {
-                        errorMessage = error.localizedDescription
-                    }
-                    isBuilding = false
-                }
-            }
+            .overlay(IPAGestureLayer(showSheet: $showSheet).allowsHitTesting(true))
             .sheet(isPresented: $showSheet) {
-                IPAExportSheet(ipaFile: $ipaFile, isBuilding: $isBuilding, errorMessage: $errorMessage)
+                IPAExportSheet(isPresented: $showSheet).preferredColorScheme(.dark)
             }
     }
 }
 
-struct IPAGestureLayer: View {
-    var body: some View {
-        Color.clear
-            .contentShape(Rectangle())
-            .allowsHitTesting(true)
-    }
-}
-
-struct PassthroughView: UIViewRepresentable {
+private struct IPAGestureLayer: UIViewRepresentable {
+    @Binding var showSheet: Bool
+    func makeCoordinator() -> Coord { Coord(showSheet: $showSheet) }
     func makeUIView(context: Context) -> UIView {
-        let v = UIView()
-        v.backgroundColor = .clear
+        let v   = PassthroughView()
+        let tap = UITapGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coord.fired))
+        tap.numberOfTouchesRequired = 3
+        tap.numberOfTapsRequired    = 1
+        v.addGestureRecognizer(tap)
         return v
     }
     func updateUIView(_ uiView: UIView, context: Context) {}
+
+    final class Coord: NSObject {
+        @Binding var showSheet: Bool
+        init(showSheet: Binding<Bool>) { _showSheet = showSheet }
+        @objc func fired() {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            DispatchQueue.main.async { self.showSheet = true }
+        }
+    }
 }
 
-struct IPAExportSheet: View {
-    @Binding var ipaFile: IPAFile?
-    @Binding var isBuilding: Bool
-    @Binding var errorMessage: String?
+private final class PassthroughView: UIView {
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        if hit === self {
+            let active = gestureRecognizers?.contains {
+                $0.state == .possible || $0.state == .began || $0.state == .changed
+            } ?? false
+            return active ? self : nil
+        }
+        return hit
+    }
+}
+
+private struct IPAExportSheet: View {
+    @Binding var isPresented: Bool
+    @State private var ipaFile:  IPAFile?
+    @State private var building  = false
+    @State private var exporting = false
+    @State private var errMsg:   String?
 
     var body: some View {
-        NavigationView {
-            VStack(spacing: 20) {
-                if isBuilding {
-                    ProgressView("Building IPA...")
-                        .progressViewStyle(CircularProgressViewStyle())
-                } else if let file = ipaFile {
-                    Text("IPA ready for sideloading")
-                        .font(.headline)
-                    Text(file.file.filename ?? "App.ipa")
-                        .font(.caption).foregroundStyle(.secondary)
-
-                    Button("Save / Share IPA") {
-                        // The actual fileExporter is attached to the parent
+        ZStack {
+            Color(white: 0.08).ignoresSafeArea()
+            VStack(spacing: 28) {
+                Image(systemName: building ? "gearshape.2" : "square.and.arrow.up.fill")
+                    .font(.system(size: 50, weight: .ultraLight)).foregroundStyle(.orange)
+                Text("Export IPA")
+                    .font(.system(size: 24, weight: .bold)).foregroundStyle(.white)
+                if let e = errMsg {
+                    Text(e).font(.caption).foregroundStyle(.red)
+                        .multilineTextAlignment(.center).padding(.horizontal, 24)
+                }
+                VStack(spacing: 12) {
+                    Button(action: go) {
+                        HStack(spacing: 8) {
+                            if building { ProgressView().tint(.black).scaleEffect(0.8) }
+                            Text(building ? "Building…" : (ipaFile != nil ? "Save / Share" : "Build & Export"))
+                                .font(.system(size: 16, weight: .semibold))
+                        }
+                        .foregroundStyle(.black).frame(maxWidth: .infinity).frame(height: 50)
+                        .background(building ? Color.orange.opacity(0.5) : Color.orange,
+                                    in: RoundedRectangle(cornerRadius: 13))
                     }
-                } else if let err = errorMessage {
-                    Text("Export failed")
-                        .foregroundStyle(.red)
-                    Text(err).font(.caption)
+                    .disabled(building)
+                    Button("Dismiss") { isPresented = false }
+                        .font(.system(size: 15)).foregroundStyle(.white.opacity(0.4))
                 }
-                Spacer()
+                .padding(.horizontal, 28)
             }
-            .padding()
-            .navigationTitle("IPA Export")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { /* dismiss handled by parent */ }
-                }
+            .padding(.vertical, 40)
+        }
+        .fileExporter(isPresented: $exporting, document: ipaFile,
+                      contentType: .ipa) { result in
+            if case .failure(let e) = result { errMsg = e.localizedDescription }
+            else { isPresented = false }
+        }
+    }
+
+    private func go() {
+        if ipaFile != nil { exporting = true; return }
+        errMsg = nil; building = true
+        Task { @MainActor in
+            do {
+                let path   = try await exportIPA()
+                ipaFile    = try IPAFile(ipaURL: URL(fileURLWithPath: path))
+                building   = false
+                exporting  = true
+            } catch {
+                building = false; errMsg = error.localizedDescription
             }
         }
     }
