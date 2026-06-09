@@ -92,7 +92,7 @@ final class MeshExporter {
         for (i, cls) in meshData.classifications.enumerated() {
             byClass[cls.rawValue, default: []].append(i)
         }
-        for (raw, idxs) in byClass.sorted(by: { $0.key < 1.key }) {
+        for (raw, idxs) in byClass.sorted(by: { $0.key < $1.key }) {
             let cls = ARMeshClassification(rawValue: raw) ?? .none
             lines.append("g \(cls.displayName.replacingOccurrences(of: " ", with: "_"))")
             for i in idxs {
@@ -563,7 +563,7 @@ final class MeshExporter {
         ]
         for v in meshData.vertices { lines.append("v \(v.x) \(v.y) \(v.z)") }
         lines.append("")
-        for n in meshData.normals  { lines.append("vn \(n.x) \(n.y) \(n.z)") }
+        for n in meshData.normals  { lines.append("vn \(n.x) \(n.y) \(n.z)")
         lines.append("")
         for uv in vtList           { lines.append("vt \(uv.x) \(uv.y)") }
         lines.append(""); lines.append("usemtl PhotoMesh")
