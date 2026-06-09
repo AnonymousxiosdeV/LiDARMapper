@@ -51,8 +51,9 @@ final class ScanViewModel: ObservableObject {
     @Published var exportURL:          URL?         = nil
     @Published var exportFormat:       ExportFormat = .obj
     @Published var capturedFrameCount: Int          = 0
+    @Published var maxScanDistance:    Float        = 5.0   // runtime adjustable LiDAR max distance (meters)
 
-    static let maxFrames = 400   // raised for denser coverage
+    static let maxFrames = 400
 
     private(set) var meshAnchors  = [UUID: ARMeshAnchor]()
     private let meshLock          = NSLock()
@@ -63,16 +64,14 @@ final class ScanViewModel: ObservableObject {
     private var capturedFrames   = [CapturedFrame]()
     private let framesLock       = NSLock()
     private var lastCaptureDate  = Date.distantPast
-    private let captureInterval: TimeInterval = 0.20   // denser frames for better texture
-    private var lastCapturedTransform: simd_float4x4?  // for deduplication
+    private let captureInterval: TimeInterval = 0.20
+    private var lastCapturedTransform: simd_float4x4?
 
     private var fpsFrames = 0
     private var fpsDate   = Date()
 
     let log = AppLogger.shared
     nonisolated let exporter = MeshExporter()
-
-    // MARK: - Camera Switch
 
     func switchCamera() {
         guard phase == .idle || phase == .paused else { return }
@@ -84,8 +83,6 @@ final class ScanViewModel: ObservableObject {
         cameraMode = next
         resetScan()
     }
-
-    // MARK: - Rear Anchor Management
 
     func anchorAdded(_ anchor: ARMeshAnchor) {
         meshLock.lock(); meshAnchors[anchor.identifier] = anchor; meshLock.unlock()
@@ -99,8 +96,6 @@ final class ScanViewModel: ObservableObject {
         meshLock.lock(); meshAnchors.removeValue(forKey: anchor.identifier); meshLock.unlock()
         refreshStats()
     }
-
-    // MARK: - Front Face Anchor Management
 
     func faceAnchorAdded(_ anchor: ARFaceAnchor) {
         let snap = FaceSnapshot(anchor: anchor)
@@ -119,14 +114,11 @@ final class ScanViewModel: ObservableObject {
         faceLock.lock(); faceSnapshots.removeValue(forKey: anchor.identifier); faceLock.unlock()
     }
 
-    // MARK: - Frame Capture
-
     func tryCapture(arFrame: ARFrame) {
         guard case .scanning = phase else { return }
         let now = Date()
         guard now.timeIntervalSince(lastCaptureDate) >= captureInterval else { return }
 
-        // Slightly relaxed dedup for denser spatial coverage (better textures).
         let newTransform = arFrame.camera.transform
         if let prev = lastCapturedTransform {
             let dist  = simd_distance(newTransform.columns.3.xyz, prev.columns.3.xyz)
@@ -158,8 +150,6 @@ final class ScanViewModel: ObservableObject {
         return capturedFrames
     }
 
-    // MARK: - FPS
-
     func frameRendered() {
         fpsFrames += 1
         let elapsed = Date().timeIntervalSince(fpsDate)
@@ -177,8 +167,6 @@ final class ScanViewModel: ObservableObject {
         vertexCount = v; faceCount = f; tileCount = t
     }
 
-    // MARK: - Export URL helper (nonisolated — safe to call from Task.detached)
-
     nonisolated func makeExportURL(format: ExportFormat) throws -> URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let dir  = docs.appendingPathComponent("LiDARMapper/exports", isDirectory: true)
@@ -189,8 +177,6 @@ final class ScanViewModel: ObservableObject {
         return dir.appendingPathComponent("scan_\(stamp).\(format.fileExtension)")
     }
 
-    // MARK: - Export
-
     func startExport(withTexture: Bool = true) {
         switch cameraMode {
         case .rear:  startRearExport(frames: withTexture ? allCapturedFrames() : [])
@@ -200,7 +186,12 @@ final class ScanViewModel: ObservableObject {
 
     private func startRearExport(frames: [CapturedFrame]) {
         meshLock.lock()
-        let anchors = Array(meshAnchors.values)
+        // Filter anchors within runtime maxScanDistance for controllable scan range
+        let camPos = simd_make_float3(0,0,0) // world origin; for live camera-relative use currentFrame in AR delegate
+        let anchors = Array(meshAnchors.values).filter { a in
+            let p = a.transform.columns.3.xyz
+            return simd_distance(p, camPos) <= maxScanDistance
+        }
         meshLock.unlock()
 
         guard !anchors.isEmpty else {
@@ -208,7 +199,7 @@ final class ScanViewModel: ObservableObject {
             return
         }
 
-        log.log("Rear export: \(anchors.count) tiles, \(frames.count) frames")
+        log.log("Rear export: \(anchors.count) tiles (filtered to \(maxScanDistance)m), \(frames.count) frames")
         phase = .exporting(progress: 0)
 
         let exp    = exporter
@@ -283,8 +274,6 @@ final class ScanViewModel: ObservableObject {
         showShareSheet = true
         logger.log("Export ready: \(url.lastPathComponent)")
     }
-
-    // MARK: - Reset
 
     func resetScan() {
         meshLock.lock(); meshAnchors.removeAll(); meshLock.unlock()
