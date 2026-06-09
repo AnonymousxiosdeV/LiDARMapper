@@ -1,16 +1,12 @@
 // MiniScanPreview.swift — LiDARMapper
 // Corner mini point-cloud during scanning.
-// • Updates in real-time with RGB colour sampled from the camera feed
-// • Tap to expand to a full-screen interactive viewer
+// Fixed actor isolation for main-actor ViewModel properties.
 
 import SwiftUI
 import SceneKit
 import ARKit
 
-// MARK: - MiniScanPreviewView
-
 struct MiniScanPreviewView: View {
-
     @ObservedObject var viewModel: ScanViewModel
     @State private var expanded = false
 
@@ -60,10 +56,7 @@ struct MiniScanPreviewView: View {
     }
 }
 
-// MARK: - MiniSceneContainer
-
 struct MiniSceneContainer: UIViewRepresentable {
-
     @ObservedObject var viewModel: ScanViewModel
     let expanded: Bool
 
@@ -81,37 +74,30 @@ struct MiniSceneContainer: UIViewRepresentable {
     }
 
     func updateUIView(_ v: SCNView, context: Context) {
-        let coord = context.coordinator
-        coord.syncPointCloud(from: viewModel)
-        coord.updateCameraTracking(from: viewModel)
-        coord.setExpandedGestures(expanded, on: v)
+        context.coordinator.syncPointCloud(from: viewModel)
+        context.coordinator.updateCameraTracking(from: viewModel)
+        context.coordinator.setExpandedGestures(expanded, on: v)
     }
 }
 
-// MARK: - MiniCoordinator
-
 final class MiniCoordinator: NSObject {
-
     private weak var scnView: SCNView?
     private var scene:        SCNScene?
-    private var cloudRoot:    SCNNode?     // parent for the point-cloud node
-    private var pivotNode:    SCNNode?     // tracks camera heading
+    private var cloudRoot:    SCNNode?
+    private var pivotNode:    SCNNode?
     private var orbitNode:    SCNNode?
     private var gesturesAdded = false
 
     private var lastSyncCount  = -1
-    private let syncThrottle   = 3         // rebuild after every 3 new tiles
+    private let syncThrottle   = 3
 
     private var lastPan:   CGPoint = .zero
     private var lastPinch: CGFloat = 1.0
-
-    // MARK: Setup
 
     func setup(_ v: SCNView, expanded: Bool) {
         scnView = v
         let s = SCNScene(); scene = s; v.scene = s
 
-        // Minimal ambient + one directional (points are unlit but a slight tint helps depth)
         addLight(s, .ambient,     UIColor(white: 0.9, alpha: 1), 600)
         addLight(s, .directional, UIColor(white: 0.7, alpha: 1), 400,
                  euler: SCNVector3(-0.5, 0.4, 0))
@@ -120,7 +106,6 @@ final class MiniCoordinator: NSObject {
 
         let orbit = SCNNode()
         orbit.position = SCNVector3(0, 0, expanded ? 5 : 4)
-        // Orbit is NOT a child of pivot — camera stays fixed, cloud rotates
         s.rootNode.addChildNode(orbit); orbitNode = orbit
 
         let camNode = SCNNode(); let cam = SCNCamera()
@@ -131,37 +116,33 @@ final class MiniCoordinator: NSObject {
         let root = SCNNode(); pivot.addChildNode(root); cloudRoot = root
     }
 
-    // MARK: Point Cloud Sync
-
+    // Snapshot on main actor to satisfy isolation
     func syncPointCloud(from viewModel: ScanViewModel) {
-        let count = viewModel.tileCount
-        guard abs(count - lastSyncCount) >= syncThrottle else { return }
-        lastSyncCount = count
+        Task { @MainActor in
+            let count = viewModel.tileCount
+            guard abs(count - self.lastSyncCount) >= self.syncThrottle else { return }
+            self.lastSyncCount = count
 
-        let anchors = Array(viewModel.meshAnchors.values)
-        guard !anchors.isEmpty, let root = cloudRoot else {
-            cloudRoot?.childNodes.forEach { $0.removeFromParentNode() }
-            return
-        }
+            let anchors = Array(viewModel.meshAnchors.values)
+            guard !anchors.isEmpty, let root = self.cloudRoot else {
+                self.cloudRoot?.childNodes.forEach { $0.removeFromParentNode() }
+                return
+            }
+            let latestFrame = viewModel.allCapturedFrames().last
 
-        // Grab the latest captured frame for colour sampling
-        let latestFrame = viewModel.allCapturedFrames().last
-
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
-            let node = self.buildPointCloud(from: anchors, colorFrame: latestFrame)
-            DispatchQueue.main.async {
-                root.childNodes.forEach { $0.removeFromParentNode() }
-                if let n = node { root.addChildNode(n); self.centreAndScale(n, in: root) }
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                guard let self else { return }
+                let node = self.buildPointCloud(from: anchors, colorFrame: latestFrame)
+                DispatchQueue.main.async {
+                    root.childNodes.forEach { $0.removeFromParentNode() }
+                    if let n = node { root.addChildNode(n); self.centreAndScale(n, in: root) }
+                }
             }
         }
     }
 
-    // MARK: Build coloured point cloud
-
     private func buildPointCloud(from anchors: [ARMeshAnchor],
                                   colorFrame: CapturedFrame?) -> SCNNode? {
-        // Cap at 30 K visible points for smooth real-time updates
         let maxPoints  = 30_000
         let totalVerts = anchors.reduce(0) { $0 + $1.geometry.vertices.count }
         let step       = max(1, totalVerts / maxPoints)
@@ -171,7 +152,6 @@ final class MiniCoordinator: NSObject {
         flatPos.reserveCapacity(min(totalVerts, maxPoints) * 3)
         flatColor.reserveCapacity(min(totalVerts, maxPoints) * 4)
 
-        // Decode the reference frame once — O(1) regardless of vertex count
         let sampler = colorFrame.flatMap { BitmapSampler(jpeg: $0.jpegData) }
 
         for anchor in anchors {
@@ -182,8 +162,7 @@ final class MiniCoordinator: NSObject {
                 let w = xform.transformPoint(mesh.vertexPosition(at: i))
                 flatPos.append(w.x); flatPos.append(w.y); flatPos.append(w.z)
 
-                // Project vertex into the latest camera frame to get RGB
-                var r: Float = 0.50, g: Float = 0.68, b: Float = 0.85  // fallback tint
+                var r: Float = 0.50, g: Float = 0.68, b: Float = 0.85
                 if let frame = colorFrame, let smp = sampler,
                    let uv = frame.project(w) {
                     let c = smp.sample(at: uv)
@@ -199,21 +178,18 @@ final class MiniCoordinator: NSObject {
         guard !flatPos.isEmpty else { return nil }
         let n = flatPos.count / 3
 
-        // Position source
         let posData = Data(bytes: flatPos,   count: flatPos.count   * 4)
         let posSrc  = SCNGeometrySource(data: posData, semantic: .vertex,
                                          vectorCount: n, usesFloatComponents: true,
                                          componentsPerVector: 3, bytesPerComponent: 4,
                                          dataOffset: 0, dataStride: 12)
 
-        // Per-vertex RGBA colour source
         let colData = Data(bytes: flatColor, count: flatColor.count * 4)
         let colSrc  = SCNGeometrySource(data: colData, semantic: .color,
                                          vectorCount: n, usesFloatComponents: true,
                                          componentsPerVector: 4, bytesPerComponent: 4,
                                          dataOffset: 0, dataStride: 16)
 
-        // One index per point
         var idx = (0..<Int32(n)).map { $0 }
         let idxData = Data(bytes: &idx, count: n * 4)
         let element = SCNGeometryElement(data: idxData, primitiveType: .point,
@@ -224,24 +200,24 @@ final class MiniCoordinator: NSObject {
 
         let geo = SCNGeometry(sources: [posSrc, colSrc], elements: [element])
         let mat = SCNMaterial()
-        mat.lightingModel    = .constant   // vertex colour drives output directly
+        mat.lightingModel    = .constant
         mat.diffuse.contents = UIColor.white
         mat.isDoubleSided    = true
         geo.materials = [mat]
         return SCNNode(geometry: geo)
     }
 
-    // MARK: Camera tracking (keeps cloud oriented toward scan direction)
-
     func updateCameraTracking(from viewModel: ScanViewModel) {
-        guard let pivot = pivotNode else { return }
-        if let t = viewModel.allCapturedFrames().last?.cameraTransform {
-            let yaw  = atan2(t.columns.2.x, t.columns.2.z)
-            let cur  = pivot.eulerAngles.y
-            let diff = shortestAngle(from: cur, to: -yaw)
-            pivot.eulerAngles.y = cur + diff * 0.08
-            let pitch = -0.25 + Float(t.columns.2.y) * 0.3
-            pivot.eulerAngles.x += (pitch - pivot.eulerAngles.x) * 0.05
+        Task { @MainActor in
+            guard let pivot = self.pivotNode else { return }
+            if let t = viewModel.allCapturedFrames().last?.cameraTransform {
+                let yaw  = atan2(t.columns.2.x, t.columns.2.z)
+                let cur  = pivot.eulerAngles.y
+                let diff = self.shortestAngle(from: cur, to: -yaw)
+                pivot.eulerAngles.y = cur + diff * 0.08
+                let pitch = -0.25 + Float(t.columns.2.y) * 0.3
+                pivot.eulerAngles.x += (pitch - pivot.eulerAngles.x) * 0.05
+            }
         }
     }
 
@@ -252,14 +228,10 @@ final class MiniCoordinator: NSObject {
         return d
     }
 
-    // MARK: Expanded gestures
-
     func setExpandedGestures(_ expanded: Bool, on v: SCNView) {
         if expanded && !gesturesAdded {
-            v.addGestureRecognizer(UIPanGestureRecognizer(target: self,
-                                    action: #selector(handlePan(_:))))
-            v.addGestureRecognizer(UIPinchGestureRecognizer(target: self,
-                                    action: #selector(handlePinch(_:))))
+            v.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:))))
+            v.addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:))))
             gesturesAdded = true
         } else if !expanded && gesturesAdded {
             v.gestureRecognizers?.forEach { v.removeGestureRecognizer($0) }
@@ -284,8 +256,6 @@ final class MiniCoordinator: NSObject {
         orbit.position.z = max(0.5, min(30, orbit.position.z / Float(g.scale / lastPinch)))
         lastPinch = g.scale
     }
-
-    // MARK: Helpers
 
     private func centreAndScale(_ node: SCNNode, in parent: SCNNode) {
         let (mn, mx) = node.boundingBox
