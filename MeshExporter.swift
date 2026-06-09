@@ -92,7 +92,7 @@ final class MeshExporter {
         for (i, cls) in meshData.classifications.enumerated() {
             byClass[cls.rawValue, default: []].append(i)
         }
-        for (raw, idxs) in byClass.sorted(by: { $0.key < $1.key }) {
+        for (raw, idxs) in byClass.sorted(by: { $0.key < 1.key }) {
             let cls = ARMeshClassification(rawValue: raw) ?? .none
             lines.append("g \(cls.displayName.replacingOccurrences(of: " ", with: "_"))")
             for i in idxs {
@@ -356,25 +356,13 @@ final class MeshExporter {
         log.log("exportAll complete — geo, textured, PLY")
     }
 
-    // MARK: - Seamless Textured OBJ
-    //
-    // Instead of assigning one camera frame per face (which causes colour seams
-    // wherever frame boundaries cross geometry), this method computes a
-    // weighted-average colour for every VERTEX from ALL frames that can see it.
-    // The result is baked into a compact vertex-indexed texture: UV[i] always
-    // points to exactly one texel — vertex i's blended colour — so adjacent
-    // triangles sharing a vertex share the same colour sample.  No seams.
-
-    // MARK: - Seamless Textured OBJ  (triplanar world-space UVs + triangle rasterisation)
-    //
-    // Why this beats the vertex-index approach:
-
     // MARK: - Seamless Photographic Textured OBJ
     //
     // Uses actual camera-frame images in a grid atlas (not blurred vertex colours).
     // Each face is assigned to the best camera frame; connected face clusters are
     // smoothed so neighbouring faces prefer the same frame, eliminating most seams.
     // Exposure is normalised across frames before baking the atlas.
+    // UV mapping uses per-face projection into assigned frame + atlas cell offset.
 
     func exportSeamlessTextured(meshData: UnifiedMeshData,
                                  frames:   [CapturedFrame],
@@ -395,14 +383,16 @@ final class MeshExporter {
         let sel     = stride(from: 0, to: frames.count, by: step)
                           .prefix(maxSel).map { frames[$0] }
         let nFrames = sel.count
-        let nCols   = nFrames <= 4 ? nFrames : (nFrames <= 8 ? 4 : 4)
+        let nCols   = nFrames <= 4 ? nFrames : 4
         let nRows   = (nFrames + nCols - 1) / nCols
 
         // Cell size matched to camera frame aspect ratio (no letterbox distortion)
         let frameW  = Int(sel[0].textureSize.width)
         let frameH  = Int(sel[0].textureSize.height)
-        let cellW   = max(512, 4096 / nCols)
-        let cellH   = frameH > 0 ? cellW * frameH / frameW : cellW
+        let cellW_f = max(512.0, 4096.0 / Double(nCols))
+        let cellW   = Int(cellW_f.rounded())
+        let aspect  = frameH > 0 ? Double(frameH) / Double(frameW) : 1.0
+        let cellH   = Int((cellW_f * aspect).rounded())
         let atlasW  = nCols * cellW
         let atlasH  = nRows * cellH
         progress?(0.04)
@@ -472,8 +462,7 @@ final class MeshExporter {
         progress?(0.40)
 
         // ── 5. Build atlas pixel buffer directly (thread-safe, no UIKit) ──
-        // Row 0 = top of image (UIImage convention).
-        // Exposure correction applied per-pixel as a linear scale.
+        // Row 0 = top of image. Exposure correction applied per-pixel.
         var px = [UInt8](repeating: 100, count: atlasW * atlasH * 4)
         for (si, _) in sel.enumerated() {
             guard let smp = samplers[si] else { continue }
@@ -494,7 +483,7 @@ final class MeshExporter {
         }
         progress?(0.62)
 
-        // Create atlas JPEG from pixel buffer
+        // Create atlas JPEG from pixel buffer (y=0 top convention)
         let sp = CGColorSpaceCreateDeviceRGB()
         guard let cgCtx = CGContext(data: &px, width: atlasW, height: atlasH,
                                     bitsPerComponent: 8, bytesPerRow: atlasW * 4,
@@ -504,19 +493,7 @@ final class MeshExporter {
         else { throw NSError(domain: "MeshExporter", code: 3,
                              userInfo: [NSLocalizedDescriptionKey: "Atlas CGContext failed"]) }
 
-        // CGContext with our pixel buffer has y=0 at bottom; our pixels have y=0 at top.
-        // Flip the image vertically so the JPEG matches the UV layout.
-        guard let flipped: UIImage = {
-            let size = CGSize(width: atlasW, height: atlasH)
-            UIGraphicsBeginImageContextWithOptions(size, true, 1)
-            defer { UIGraphicsEndImageContext() }
-            let ctx2 = UIGraphicsGetCurrentContext()!
-            ctx2.translateBy(x: 0, y: CGFloat(atlasH))
-            ctx2.scaleBy(x: 1, y: -1)
-            ctx2.draw(cgImg, in: CGRect(origin: .zero, size: size))
-            return UIGraphicsGetImageFromCurrentImageContext()
-        }(),
-        let atlasJPG = flipped.jpegData(compressionQuality: 0.92)
+        guard let atlasJPG = UIImage(cgImage: cgImg).jpegData(compressionQuality: 0.92)
         else { throw NSError(domain: "MeshExporter", code: 4,
                              userInfo: [NSLocalizedDescriptionKey: "Atlas JPEG encode failed"]) }
         progress?(0.72)
@@ -566,7 +543,7 @@ final class MeshExporter {
             func atlasUV(_ v: SIMD3<Float>) -> SIMD2<Float> {
                 let fuv = clampProject(v, frame)
                 let au  = (Float(col) + fuv.x) / Float(nCols)
-                // OBJ vt: v=0 at bottom of texture; our atlas v=0 is top → flip
+                // v=0 at bottom for OBJ; atlas image top=row0 → flip v
                 let av  = 1.0 - (Float(row) + fuv.y) / Float(nRows)
                 return SIMD2<Float>(au, av)
             }
