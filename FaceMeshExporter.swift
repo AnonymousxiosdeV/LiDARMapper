@@ -1,6 +1,6 @@
 // FaceMeshExporter.swift — LiDARMapper
 // Extension on MeshExporter adding TrueDepth face mesh export.
-// ADD this as a new file — do not replace MeshExporter.swift.
+// Face texture now correctly aligned with ARKit UVs (no erroneous v-flip; matches captured front-camera image orientation).
 
 import ARKit
 import simd
@@ -26,7 +26,6 @@ extension MeshExporter {
         let baseName   = url.deletingPathExtension().lastPathComponent
         let hasTexture = !frames.isEmpty
 
-        // Save texture frame if available
         var texName: String?
         if hasTexture, let bestFrame = frames.last {
             texName = baseName + "_face_texture.jpg"
@@ -35,7 +34,6 @@ extension MeshExporter {
         }
         progress?(0.20)
 
-        // Write MTL
         let mtlName = baseName + ".mtl"
         let mtlURL  = url.deletingLastPathComponent().appendingPathComponent(mtlName)
         var mtl = "newmtl FaceMaterial\nKa 1 1 1\nKd 1 1 1\nKs 0 0 0\nillum 1\n"
@@ -43,13 +41,11 @@ extension MeshExporter {
         try mtl.write(to: mtlURL, atomically: true, encoding: .utf8)
         progress?(0.30)
 
-        // Transform vertices to world space
         let worldVerts: [SIMD3<Float>] = snap.vertices.map {
             snap.transform.transformPoint($0)
         }
         progress?(0.40)
 
-        // Compute smooth normals
         let triCount = snap.triangleCount
         let idxBuf   = snap.triangleIndices
         var normals  = [SIMD3<Float>](repeating: .zero, count: worldVerts.count)
@@ -67,7 +63,6 @@ extension MeshExporter {
         }
         progress?(0.55)
 
-        // Build OBJ
         var lines = [
             "# LiDAR Mapper — TrueDepth Face Scan",
             "# Date: \(ISO8601DateFormatter().string(from: Date()))",
@@ -78,8 +73,8 @@ extension MeshExporter {
         lines.append("")
         for n in normals    { lines.append("vn \(n.x) \(n.y) \(n.z)") }
         lines.append("")
-        // ARFaceGeometry UV coords — flip V for OBJ convention
-        for uv in snap.textureCoordinates { lines.append("vt \(uv.x) \(1.0 - uv.y)") }
+        // Use raw ARKit textureCoordinates (no extra flip) so texture lines up correctly with saved face image
+        for uv in snap.textureCoordinates { lines.append("vt \(uv.x) \(uv.y)") }
         lines.append("")
         lines.append("usemtl FaceMaterial")
 
