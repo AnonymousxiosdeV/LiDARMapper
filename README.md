@@ -26,18 +26,17 @@ SwiftUI iOS app for real-time LiDAR 3D scanning with mesh export (OBJ/PLY with t
 1. Create a new **iOS App** project in Xcode (SwiftUI, Swift).
 2. Delete the default `ContentView.swift` and `AppNameApp.swift`.
 3. Add **all** `.swift` files from this repository to the project (drag the folder or "Add Files").
-4. **Important**: Remove or ignore the file named `IPAExporter 2.swift` (has space + "2" — use the clean `IPAExporter.swift` instead).
-5. Add required **capabilities / entitlements** in Signing & Capabilities:
+4. Add required **capabilities / entitlements** in Signing & Capabilities:
    - Background Modes → Background fetch (optional)
    - Hardened Runtime (if distributing)
-6. In `Info.plist` add:
+5. In `Info.plist` add:
    - `NSCameraUsageDescription` : "LiDARMapper uses the camera for real-time 3D scanning and mesh texturing."
    - `NSLocationWhenInUseUsageDescription` (if plane detection or location used)
-7. For **RoomPlan** support add the entitlement:
+6. For **RoomPlan** support add the entitlement:
    - `com.apple.developer.roomplan` = true (requires Apple developer account with RoomPlan capability enabled)
-8. Set deployment target to iOS 17.0+.
-9. Build & run on a physical LiDAR-capable device.
-10. (Optional) To enable file logging: Edit scheme → Run → Arguments → add `--debug` launch argument. Logs appear in Files app under LiDARMapper/logs/.
+7. Set deployment target to iOS 17.0+.
+8. Build & run on a physical LiDAR-capable device.
+9. (Optional) To enable file logging: Edit scheme → Run → Arguments → add `--debug` launch argument. Logs appear in Files app under LiDARMapper/logs/.
 
 ## Architecture Notes (from expert review)
 - **MVVM + Coordinator pattern**: `ScanViewModel` (ObservableObject) owns scan state and export logic. `ARCoordinator` (NSObject) owns ARSession / ARSCNViewDelegate / ARSessionDelegate to keep delegate callbacks clean.
@@ -66,7 +65,8 @@ All sources are flat (small project). Key components:
 
 ## Fixes Applied in This Review
 - Added this comprehensive README with build steps and architecture guidance.
-- Cleaned filename: `IPAExporter.swift` (removed the problematic "IPAExporter 2.swift" duplicate with space in name).
+- Removed duplicate `IPAExporter 2.swift` (exact copy with invalid filename).
+- Improved `ScanPhase` to synthesize `Equatable` conformance (cleaner, modern Swift).
 - Improved `TextureAtlas.build` to be safer for background-thread export (CGContext path; original UIGraphics* could crash when called from Task.detached).
 - Minor robustness: added more guards, better logging, and HIG-aligned comments.
 - Confirmed no secret leaks, modern concurrency usage, and good separation of concerns.
