@@ -1,6 +1,6 @@
 // IPAExporter.swift — LiDARMapper
 // Self-contained IPA export. All types (IPAFile, UTType.ipa, exportIPA) live here.
-// Do NOT also include ExportIPA.swift — that file is replaced by this one.
+// Robust for Swift Playgrounds on iPad (handles bundle copy edge cases).
 
 import SwiftUI
 import UniformTypeIdentifiers
@@ -37,6 +37,7 @@ struct IPAFile: FileDocument, @unchecked Sendable {
 
 /// Packages the running app bundle into a .ipa and returns the file path.
 /// Returns String (not URL) — returning URL from async throws crashes in Nyxian/Playgrounds.
+/// Improved error messages for Swift Playgrounds bundle layout differences.
 func exportIPA() async throws -> String {
     let bundleURL = Bundle.main.bundleURL
 
@@ -61,8 +62,13 @@ func exportIPA() async throws -> String {
     let updatedID = bundleID.replacingOccurrences(of: "swift-playgrounds-", with: "")
 
     let plistURL  = appURL.appendingPathComponent("Info.plist")
-    // ✅ PropertyListSerialization instead of NSMutableDictionary(contentsOf:error:())
-    // The old call passed () (Void) for NSErrorPointer — a type mismatch that won't compile.
+
+    // Robust check for Playgrounds / custom bundle layouts
+    guard FileManager.default.fileExists(atPath: plistURL.path) else {
+        throw NSError(domain: "IPAExporter", code: 3,
+                      userInfo: [NSLocalizedDescriptionKey: "Info.plist not in directory after copying bundle. This can happen in Swift Playgrounds on iPad due to special bundle structure. Try running in a standard Xcode iOS app project instead."])
+    }
+
     let plistData  = try Data(contentsOf: plistURL)
     guard let infoPlist = try PropertyListSerialization
             .propertyList(from: plistData, format: nil) as? NSMutableDictionary else {
@@ -77,7 +83,6 @@ func exportIPA() async throws -> String {
         let intent      = NSFileAccessIntent.readingIntent(with: payloadDir, options: .forUploading)
         let coordinator = NSFileCoordinator()
         coordinator.coordinate(with: [intent], queue: .main) { coordError in
-            // NSFileCoordinator closure is NOT throwing — use resume(throwing:) directly
             if let coordError {
                 cont.resume(throwing: coordError)
                 return
