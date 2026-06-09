@@ -3,8 +3,6 @@
 import SwiftUI
 import ARKit
 
-// MARK: - App Mode
-
 enum AppMode: Equatable {
     case landing
     case scanning
@@ -12,8 +10,6 @@ enum AppMode: Equatable {
     case exportIPA
     case library
 }
-
-// MARK: - ContentView
 
 struct ContentView: View {
     @State private var mode: AppMode = .landing
@@ -27,8 +23,6 @@ struct ContentView: View {
         }
     }
 }
-
-// MARK: - Landing View
 
 struct LandingView: View {
     @Binding var mode: AppMode
@@ -67,8 +61,6 @@ struct LandingView: View {
     }
 }
 
-// MARK: - Landing Button
-
 struct LandingButton: View {
     let icon: String; let title: String; let subtitle: String
     let color: Color; let action: () -> Void
@@ -92,8 +84,6 @@ struct LandingButton: View {
         }
     }
 }
-
-// MARK: - ScannerView
 
 struct ScannerView: View {
 
@@ -140,10 +130,7 @@ struct ScannerView: View {
 
             VStack(spacing: 0) {
 
-                // ── Top bar ──────────────────────────────────────────────────
                 HStack(alignment: .top, spacing: 10) {
-
-                    // Back
                     Button {
                         coordinator.pauseSession()
                         mode = .landing
@@ -159,7 +146,6 @@ struct ScannerView: View {
                     VStack(spacing: 8) {
                         LegendHUD()
 
-                        // Camera flip button
                         Button {
                             coordinator.pauseSession()
                             viewModel.switchCamera()
@@ -214,7 +200,6 @@ struct ScannerView: View {
                         .padding(.horizontal, 16).padding(.bottom, 8)
                 }
 
-                // Runtime LiDAR distance control (improved UI)
                 if isScanning && viewModel.cameraMode == .rear {
                     VStack(spacing: 4) {
                         HStack {
@@ -274,12 +259,16 @@ struct ScannerView: View {
                     viewModel.exportFormat = .ply
                     viewModel.startExport(withTexture: false)
                 }
+                // Photogrammetry dataset (images + poses) for external OBJ processing
+                Button("Photogrammetry Dataset (images + poses)") {
+                    viewModel.startPhotogrammetryExport()
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(isFrontMode
                  ? "TrueDepth face mesh uses built-in ARKit UV coordinates."
-                 : "OBJ + Texture projects captured camera frames onto the mesh.")
+                 : "OBJ + Texture projects frames onto mesh. Photogrammetry exports raw images + camera poses for external tools to generate OBJ.")
         }
         .sheet(isPresented: $viewModel.showShareSheet) {
             if let url = viewModel.exportURL {
@@ -293,8 +282,6 @@ struct ScannerView: View {
         }
     }
 }
-
-// MARK: - Export Result Sheet
 
 struct ExportResultSheet: View {
     let url: URL
@@ -342,8 +329,6 @@ struct ExportResultSheet: View {
     }
 }
 
-// MARK: - Control Bar
-
 struct ControlBar: View {
     @ObservedObject var viewModel: ScanViewModel
     let coordinator: ARCoordinator
@@ -388,8 +373,6 @@ struct ControlBar: View {
     }
 }
 
-// MARK: - Stats HUD
-
 struct StatsHUD: View {
     @ObservedObject var viewModel: ScanViewModel
     var body: some View {
@@ -415,8 +398,6 @@ struct StatsHUD: View {
     }
 }
 
-// MARK: - Legend HUD
-
 private let legendItems: [(ARMeshClassification, String)] = [
     (.floor, "Floor"), (.wall, "Wall"), (.ceiling, "Ceiling"),
     (.table, "Table"), (.seat, "Chair"), (.window, "Window"),
@@ -437,8 +418,6 @@ struct LegendHUD: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 }
-
-// MARK: - Supporting Views
 
 struct TrackingBanner: View {
     let message: String
