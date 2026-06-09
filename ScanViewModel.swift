@@ -2,6 +2,7 @@
 
 import ARKit
 import SwiftUI
+import LocalAuthentication
 
 // MARK: - Camera Mode
 
@@ -51,7 +52,7 @@ final class ScanViewModel: ObservableObject {
     @Published var exportURL:          URL?         = nil
     @Published var exportFormat:       ExportFormat = .obj
     @Published var capturedFrameCount: Int          = 0
-    @Published var maxScanDistance:    Float        = 5.0   // runtime adjustable LiDAR max distance (meters)
+    @Published var maxScanDistance:    Float        = 5.0
 
     static let maxFrames = 400
 
@@ -73,6 +74,23 @@ final class ScanViewModel: ObservableObject {
     let log = AppLogger.shared
     nonisolated let exporter = MeshExporter()
 
+    // Face ID auth before face scan (privacy)
+    private func authenticateWithFaceID() async -> Bool {
+        let context = LAContext()
+        var error: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error),
+              context.biometryType == .faceID else { return false }
+
+        do {
+            let reason = "Authenticate with Face ID to start face scanning and mesh export."
+            try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)
+            return true
+        } catch {
+            phase = .failed(message: "Face ID authentication failed or cancelled.")
+            return false
+        }
+    }
+
     func switchCamera() {
         guard phase == .idle || phase == .paused else { return }
         let next: CameraMode = cameraMode == .rear ? .front : .rear
@@ -80,6 +98,18 @@ final class ScanViewModel: ObservableObject {
             phase = .failed(message: "\(next.rawValue) is not supported on this device.")
             return
         }
+
+        if next == .front {
+            Task {
+                let ok = await authenticateWithFaceID()
+                if ok {
+                    cameraMode = next
+                    resetScan()
+                }
+            }
+            return
+        }
+
         cameraMode = next
         resetScan()
     }
@@ -186,8 +216,7 @@ final class ScanViewModel: ObservableObject {
 
     private func startRearExport(frames: [CapturedFrame]) {
         meshLock.lock()
-        // Filter anchors within runtime maxScanDistance for controllable scan range
-        let camPos = simd_make_float3(0,0,0) // world origin; for live camera-relative use currentFrame in AR delegate
+        let camPos = simd_make_float3(0,0,0)
         let anchors = Array(meshAnchors.values).filter { a in
             let p = a.transform.columns.3.xyz
             return simd_distance(p, camPos) <= maxScanDistance
