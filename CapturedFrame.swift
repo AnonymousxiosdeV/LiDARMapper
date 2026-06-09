@@ -5,6 +5,7 @@ import ARKit
 import UIKit
 import simd
 import CoreImage
+import CoreGraphics
 
 // MARK: - CapturedFrame
 
@@ -87,20 +88,37 @@ struct TextureAtlas {
         let rows = max(1, Int(ceil(Double(n) / Double(cols))))
         guard let firstImg = UIImage(data: frames[0].jpegData) else { return nil }
         let fw = firstImg.size.width, fh = firstImg.size.height
-        let atlasSize = CGSize(width: CGFloat(cols)*fw, height: CGFloat(rows)*fh)
+        let atlasSize = CGSize(width: CGFloat(cols) * fw, height: CGFloat(rows) * fh)
 
-        UIGraphicsBeginImageContextWithOptions(atlasSize, false, 1.0)
-        defer { UIGraphicsEndImageContext() }
+        // Use CGContext instead of UIGraphicsBeginImageContextWithOptions.
+        // CGContext is safe to use from background threads (Task.detached in export).
+        // This fixes potential crashes when building texture atlases during export.
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        guard let ctx = CGContext(
+            data: nil,
+            width: Int(atlasSize.width),
+            height: Int(atlasSize.height),
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
 
         for (i, frame) in frames.enumerated() {
-            guard let img = UIImage(data: frame.jpegData) else { continue }
-            let col  = i % cols, row = i / cols
-            img.draw(in: CGRect(x: CGFloat(col)*fw, y: CGFloat(row)*fh, width: fw, height: fh))
+            guard let uiImage = UIImage(data: frame.jpegData),
+                  let cgImage = uiImage.cgImage else { continue }
+            let col = i % cols
+            let row = i / cols
+            let rect = CGRect(x: CGFloat(col) * fw, y: CGFloat(row) * fh, width: fw, height: fh)
+            ctx.draw(cgImage, in: rect)
         }
 
-        guard let atlasImage = UIGraphicsGetImageFromCurrentImageContext(),
-              let jpeg = atlasImage.jpegData(compressionQuality: 0.90) else { return nil }
-        return TextureAtlas(jpegData: jpeg, cols: cols, rows: rows,
+        guard let cgImage = ctx.makeImage(),
+              let jpegData = UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.90) else {
+            return nil
+        }
+
+        return TextureAtlas(jpegData: jpegData, cols: cols, rows: rows,
                             frameSize: CGSize(width: fw, height: fh))
     }
 }
