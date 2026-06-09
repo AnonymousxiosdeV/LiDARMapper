@@ -26,25 +26,13 @@ enum CameraMode: String, CaseIterable {
 
 // MARK: - Scan Phase
 
-enum ScanPhase {
+enum ScanPhase: Equatable {
     case idle
     case scanning
     case paused
     case exporting(progress: Double)
     case exported(url: URL)
     case failed(message: String)
-}
-
-extension ScanPhase: Equatable {
-    static func == (lhs: ScanPhase, rhs: ScanPhase) -> Bool {
-        switch (lhs, rhs) {
-        case (.idle,.idle),(.scanning,.scanning),(.paused,.paused): return true
-        case (.exporting(let a),.exporting(let b)): return a == b
-        case (.exported(let a),.exported(let b)): return a == b
-        case (.failed(let a),.failed(let b)):     return a == b
-        default: return false
-        }
-    }
 }
 
 // MARK: - ScanViewModel
