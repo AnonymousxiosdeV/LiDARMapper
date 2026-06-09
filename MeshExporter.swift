@@ -3,6 +3,8 @@
 import ARKit
 import simd
 import Foundation
+import UIKit
+import CoreGraphics
 
 // MARK: - Export Format
 
@@ -63,7 +65,7 @@ final class MeshExporter {
                                faces: allFaces, classifications: allCls)
     }
 
-    // MARK: - Improved angle-weighted normals (better shading than area average)
+    // MARK: - Improved angle-weighted normals
 
     private func computeAngleWeightedNormals(vertices: [SIMD3<Float>],
                                              faces: [SIMD3<UInt32>]) -> [SIMD3<Float>] {
@@ -366,7 +368,6 @@ final class MeshExporter {
         let fCount = meshData.faceCount
         progress?(0.0)
 
-        // More frames (24) for richer photo coverage
         let maxSel  = min(24, frames.count)
         let step    = max(1, frames.count / maxSel)
         let sel     = stride(from: 0, to: frames.count, by: step)
@@ -377,7 +378,7 @@ final class MeshExporter {
 
         let frameW  = Int(sel[0].textureSize.width)
         let frameH  = Int(sel[0].textureSize.height)
-        let cellW_f = max(512.0, 8192.0 / Double(nCols))  // higher res target
+        let cellW_f = max(512.0, 8192.0 / Double(nCols))
         let cellW   = Int(cellW_f.rounded())
         let aspect  = frameH > 0 ? Double(frameH) / Double(frameW) : 1.0
         let cellH   = Int((cellW_f * aspect).rounded())
@@ -463,18 +464,28 @@ final class MeshExporter {
         }
         progress?(0.62)
 
+        // Create atlas with correct orientation (vertical flip so UVs align)
         let sp = CGColorSpaceCreateDeviceRGB()
         guard let cgCtx = CGContext(data: &px, width: atlasW, height: atlasH,
                                     bitsPerComponent: 8, bytesPerRow: atlasW * 4,
                                     space: sp,
                                     bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
-              let cgImg = cgCtx.makeImage()
-        else { throw NSError(domain: "MeshExporter", code: 3,
-                             userInfo: [NSLocalizedDescriptionKey: "Atlas CGContext failed"]) }
+              let cgImg = cgCtx.makeImage() else {
+            throw NSError(domain: "MeshExporter", code: 3, userInfo: [NSLocalizedDescriptionKey: "Atlas CGContext failed"])
+        }
 
-        guard let atlasJPG = UIImage(cgImage: cgImg).jpegData(compressionQuality: 0.93)
-        else { throw NSError(domain: "MeshExporter", code: 4,
-                             userInfo: [NSLocalizedDescriptionKey: "Atlas JPEG encode failed"]) }
+        // Flip vertically for correct orientation matching the 1-v UV calc
+        let size = CGSize(width: atlasW, height: atlasH)
+        UIGraphicsBeginImageContextWithOptions(size, true, 1)
+        let ctx2 = UIGraphicsGetCurrentContext()!
+        ctx2.translateBy(x: 0, y: size.height)
+        ctx2.scaleBy(x: 1, y: -1)
+        ctx2.draw(cgImg, in: CGRect(origin: .zero, size: size))
+        let flippedImg = UIGraphicsGetImageFromCurrentImageContext()!
+        UIGraphicsEndImageContext()
+        guard let atlasJPG = flippedImg.jpegData(compressionQuality: 0.93) else {
+            throw NSError(domain: "MeshExporter", code: 4, userInfo: [NSLocalizedDescriptionKey: "Atlas JPEG encode failed"])
+        }
         progress?(0.72)
 
         let dir     = url.deletingLastPathComponent()
