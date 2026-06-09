@@ -56,23 +56,30 @@ final class MeshExporter {
         }
 
         log.log("Merged: \(allVerts.count) verts, \(allFaces.count) faces")
-        let normals = computeNormals(vertices: allVerts, faces: allFaces)
+        let normals = computeAngleWeightedNormals(vertices: allVerts, faces: allFaces)
         progress?(1.0)
 
         return UnifiedMeshData(vertices: allVerts, normals: normals,
                                faces: allFaces, classifications: allCls)
     }
 
-    // MARK: - Normals
+    // MARK: - Improved angle-weighted normals (better shading than area average)
 
-    private func computeNormals(vertices: [SIMD3<Float>],
-                                faces: [SIMD3<UInt32>]) -> [SIMD3<Float>] {
+    private func computeAngleWeightedNormals(vertices: [SIMD3<Float>],
+                                             faces: [SIMD3<UInt32>]) -> [SIMD3<Float>] {
         var normals = [SIMD3<Float>](repeating: .zero, count: vertices.count)
         for face in faces {
             let (i0, i1, i2) = (Int(face.x), Int(face.y), Int(face.z))
             guard i0 < vertices.count, i1 < vertices.count, i2 < vertices.count else { continue }
-            let fn = cross(vertices[i1]-vertices[i0], vertices[i2]-vertices[i0])
-            normals[i0] += fn; normals[i1] += fn; normals[i2] += fn
+            let v0 = vertices[i0], v1 = vertices[i1], v2 = vertices[i2]
+            let fn = normalize(cross(v1-v0, v2-v0))
+            func angle(o: SIMD3<Float>, a: SIMD3<Float>, b: SIMD3<Float>) -> Float {
+                let da = normalize(a-o), db = normalize(b-o)
+                return acos(max(-1, min(1, dot(da, db))))
+            }
+            normals[i0] += fn * angle(o: v0, a: v1, b: v2)
+            normals[i1] += fn * angle(o: v1, a: v0, b: v2)
+            normals[i2] += fn * angle(o: v2, a: v0, b: v1)
         }
         return normals.map { n in let l = length(n); return l > 1e-6 ? n/l : SIMD3<Float>(0,1,0) }
     }
@@ -239,10 +246,6 @@ final class MeshExporter {
     }
 
     // MARK: - Coloured Point Cloud PLY
-    //
-    // For each vertex in the merged mesh, find the camera frame with the best
-    // view of that point, project into it, and sample the RGB colour.
-    // Output: binary-little-endian PLY with x y z r g b (15 bytes/point).
 
     func exportColoredPLY(meshData: UnifiedMeshData,
                            frames:   [CapturedFrame],
@@ -252,15 +255,12 @@ final class MeshExporter {
         let vCount = meshData.vertexCount
         progress?(0.0)
 
-        // ── Decode every frame JPEG to a fast bitmap sampler ─────────────────
-        // Done once up-front so the per-vertex loop is just array lookups.
         let samplers: [BitmapSampler?] = frames.enumerated().map { (i, f) in
             defer { progress?(0.10 * Double(i+1) / Double(max(1, frames.count))) }
             return BitmapSampler(jpeg: f.jpegData)
         }
         progress?(0.12)
 
-        // ── Per-vertex colour assignment ──────────────────────────────────────
         var colors = [SIMD3<UInt8>](repeating: SIMD3<UInt8>(150, 150, 150), count: vCount)
 
         for vi in 0..<vCount {
@@ -288,7 +288,6 @@ final class MeshExporter {
         }
         progress?(0.85)
 
-        // ── Write binary PLY ──────────────────────────────────────────────────
         let header = """
         ply\r\nformat binary_little_endian 1.0\r\ncomment LiDAR Mapper — Coloured Point Cloud\r\n\
         element vertex \(vCount)\r\nproperty float x\r\nproperty float y\r\nproperty float z\r\n\
@@ -316,8 +315,6 @@ final class MeshExporter {
 
     // MARK: - Export All Formats
 
-    /// Writes geometry OBJ, seamless-textured OBJ, and coloured PLY in one pass.
-    /// Progress 0→1 spans all three stages.
     func exportAll(meshData: UnifiedMeshData,
                    frames:   [CapturedFrame],
                    baseURL:  URL,
@@ -330,12 +327,10 @@ final class MeshExporter {
         let texURL = dir.appendingPathComponent(stem + "_textured.obj")
         let plyURL = dir.appendingPathComponent(stem + ".ply")
 
-        // ── 1. Geometry-only OBJ (fast, no colour) ──────────────── 0–8 %
         progress?(0.00, "Exporting geometry OBJ…")
         try exportOBJ(meshData: meshData, to: geoURL)
         progress?(0.08, "Geometry OBJ saved")
 
-        // ── 2. Seamless textured OBJ ─────────────────────────────  8–82 %
         if !frames.isEmpty {
             progress?(0.08, "Building seamless texture…")
             try exportSeamlessTextured(meshData: meshData, frames: frames, to: texURL) { p in
@@ -344,7 +339,6 @@ final class MeshExporter {
         }
         progress?(0.82, "Textured OBJ saved")
 
-        // ── 3. Coloured point-cloud PLY ──────────────────────────  82–100 %
         progress?(0.82, "Exporting point cloud…")
         if !frames.isEmpty {
             try exportColoredPLY(meshData: meshData, frames: frames, to: plyURL) { p in
@@ -358,12 +352,6 @@ final class MeshExporter {
     }
 
     // MARK: - Seamless Photographic Textured OBJ
-    //
-    // Uses actual camera-frame images in a grid atlas (not blurred vertex colours).
-    // Each face is assigned to the best camera frame; connected face clusters are
-    // smoothed so neighbouring faces prefer the same frame, eliminating most seams.
-    // Exposure is normalised across frames before baking the atlas.
-    // UV mapping uses per-face projection into assigned frame + atlas cell offset.
 
     func exportSeamlessTextured(meshData: UnifiedMeshData,
                                  frames:   [CapturedFrame],
@@ -378,8 +366,8 @@ final class MeshExporter {
         let fCount = meshData.faceCount
         progress?(0.0)
 
-        // ── 1. Select up to 16 evenly-spaced frames ───────────────────────
-        let maxSel  = min(16, frames.count)
+        // More frames (24) for richer photo coverage
+        let maxSel  = min(24, frames.count)
         let step    = max(1, frames.count / maxSel)
         let sel     = stride(from: 0, to: frames.count, by: step)
                           .prefix(maxSel).map { frames[$0] }
@@ -387,10 +375,9 @@ final class MeshExporter {
         let nCols   = nFrames <= 4 ? nFrames : 4
         let nRows   = (nFrames + nCols - 1) / nCols
 
-        // Cell size matched to camera frame aspect ratio (no letterbox distortion)
         let frameW  = Int(sel[0].textureSize.width)
         let frameH  = Int(sel[0].textureSize.height)
-        let cellW_f = max(512.0, 4096.0 / Double(nCols))
+        let cellW_f = max(512.0, 8192.0 / Double(nCols))  // higher res target
         let cellW   = Int(cellW_f.rounded())
         let aspect  = frameH > 0 ? Double(frameH) / Double(frameW) : 1.0
         let cellH   = Int((cellW_f * aspect).rounded())
@@ -398,7 +385,6 @@ final class MeshExporter {
         let atlasH  = nRows * cellH
         progress?(0.04)
 
-        // ── 2. Decode frames + exposure normalisation ─────────────────────
         let samplers: [BitmapSampler?] = sel.map { BitmapSampler(jpeg: $0.jpegData) }
 
         let lums: [Float] = sel.indices.map { fi in
@@ -415,11 +401,9 @@ final class MeshExporter {
         let medLum: Float = {
             let s = lums.sorted(); return s.isEmpty ? 0.5 : s[s.count / 2]
         }()
-        // linear scale factor per frame so all frames match median luminance
         let expScale: [Float] = lums.map { l in l > 0.02 ? min(3.0, medLum / l) : 1.0 }
         progress?(0.08)
 
-        // ── 3. Per-face frame assignment ──────────────────────────────────
         var faceFrame = [Int](repeating: 0, count: fCount)
         DispatchQueue.concurrentPerform(iterations: fCount) { fi in
             let face = meshData.faces[fi]
@@ -438,9 +422,6 @@ final class MeshExporter {
         }
         progress?(0.22)
 
-        // ── 4. Smooth: 4 rounds of vertex-majority voting ─────────────────
-        // Accumulate neighbour votes at each vertex, then re-assign faces.
-        // After a few rounds, large connected patches share the same frame.
         for _ in 0..<4 {
             var vertVotes = [[Int: Int]](repeating: [:], count: vCount)
             for fi in 0..<fCount {
@@ -462,8 +443,6 @@ final class MeshExporter {
         }
         progress?(0.40)
 
-        // ── 5. Build atlas pixel buffer directly (thread-safe, no UIKit) ──
-        // Row 0 = top of image. Exposure correction applied per-pixel.
         var px = [UInt8](repeating: 100, count: atlasW * atlasH * 4)
         for (si, _) in sel.enumerated() {
             guard let smp = samplers[si] else { continue }
@@ -484,7 +463,6 @@ final class MeshExporter {
         }
         progress?(0.62)
 
-        // Create atlas JPEG from pixel buffer (y=0 top convention)
         let sp = CGColorSpaceCreateDeviceRGB()
         guard let cgCtx = CGContext(data: &px, width: atlasW, height: atlasH,
                                     bitsPerComponent: 8, bytesPerRow: atlasW * 4,
@@ -494,12 +472,11 @@ final class MeshExporter {
         else { throw NSError(domain: "MeshExporter", code: 3,
                              userInfo: [NSLocalizedDescriptionKey: "Atlas CGContext failed"]) }
 
-        guard let atlasJPG = UIImage(cgImage: cgImg).jpegData(compressionQuality: 0.92)
+        guard let atlasJPG = UIImage(cgImage: cgImg).jpegData(compressionQuality: 0.93)
         else { throw NSError(domain: "MeshExporter", code: 4,
                              userInfo: [NSLocalizedDescriptionKey: "Atlas JPEG encode failed"]) }
         progress?(0.72)
 
-        // ── 6. Write atlas + MTL ───────────────────────────────────────────
         let dir     = url.deletingLastPathComponent()
         let stem    = url.deletingPathExtension().lastPathComponent
         let texName = stem + "_texture.jpg"
@@ -509,9 +486,6 @@ final class MeshExporter {
         try mtl.write(to: dir.appendingPathComponent(mtlName), atomically: true, encoding: .utf8)
         progress?(0.76)
 
-        // ── 7. Compute per-face UVs ────────────────────────────────────────
-        // Project each vertex into its face's assigned camera frame.
-        // clampProject: like CapturedFrame.project but always returns a value (clamped).
         func clampProject(_ v: SIMD3<Float>, _ frame: CapturedFrame) -> SIMD2<Float> {
             let cam = (frame.cameraTransform.inverse * SIMD4<Float>(v.x, v.y, v.z, 1)).xyz
             guard cam.z < -1e-4 else { return SIMD2<Float>(0.5, 0.5) }
@@ -544,7 +518,6 @@ final class MeshExporter {
             func atlasUV(_ v: SIMD3<Float>) -> SIMD2<Float> {
                 let fuv = clampProject(v, frame)
                 let au  = (Float(col) + fuv.x) / Float(nCols)
-                // v=0 at bottom for OBJ; atlas image top=row0 → flip v
                 let av  = 1.0 - (Float(row) + fuv.y) / Float(nRows)
                 return SIMD2<Float>(au, av)
             }
@@ -555,7 +528,6 @@ final class MeshExporter {
         }
         progress?(0.88)
 
-        // ── 8. Write OBJ ───────────────────────────────────────────────────
         var lines = [
             "# LiDAR Mapper — Photographic Textured OBJ",
             "# Camera-frame atlas with cluster-smoothed assignments",
@@ -579,9 +551,9 @@ final class MeshExporter {
                 "\(atlasW)×\(atlasH), \(vtList.count) UVs")
     }
 
-}  // end MeshExporter class
+}  // end MeshExporter
 
-// MARK: - BitmapSampler (shared helper for MeshExporter)
+// MARK: - BitmapSampler
 
 struct BitmapSampler {
     private let bytes:  [UInt8]
