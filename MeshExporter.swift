@@ -6,16 +6,12 @@ import Foundation
 import UIKit
 import CoreGraphics
 
-// MARK: - Export Format
-
 enum ExportFormat: String, CaseIterable, Identifiable {
     case obj = "OBJ"
     case ply = "PLY"
     var id: String { rawValue }
     var fileExtension: String { rawValue.lowercased() }
 }
-
-// MARK: - Unified Mesh
 
 struct UnifiedMeshData {
     var vertices:        [SIMD3<Float>]
@@ -26,13 +22,9 @@ struct UnifiedMeshData {
     var faceCount:   Int { faces.count }
 }
 
-// MARK: - MeshExporter
-
 final class MeshExporter {
 
     private let log = AppLogger.shared
-
-    // MARK: - Collect & Merge
 
     func collectMeshData(from anchors: [ARMeshAnchor],
                          progress: ((Double) -> Void)? = nil) -> UnifiedMeshData {
@@ -341,40 +333,49 @@ final class MeshExporter {
         log.log("exportAll complete — geo, textured, PLY")
     }
 
-    // MARK: - Photogrammetry Export
-    // Saves images + camera poses (transform + intrinsics) for use in external photogrammetry tools
-    // (RealityKit Object Capture, COLMAP, Meshroom, Metashape, etc.)
+    // Photogrammetry export with RealityCapture-friendly poses.csv + JSON
     func exportPhotogrammetry(frames: [CapturedFrame],
                               to folderURL: URL,
                               progress: ((Double) -> Void)? = nil) throws {
         try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
 
         var poses: [[String: Any]] = []
+        var csvLines = ["filename,x,y,z,rx,ry,rz,fx,fy,cx,cy,width,height"]
+
         for (i, frame) in frames.enumerated() {
             let imgName = String(format: "image_%03d.jpg", i)
             let imgURL = folderURL.appendingPathComponent(imgName)
             try frame.jpegData.write(to: imgURL)
 
-            // Camera pose (world transform) and intrinsics for photogrammetry
             let t = frame.cameraTransform
+            let pos = t.columns.3
+            // Approximate rotation from transform (Euler-ish for RC import)
+            let rx = atan2(t.columns.2.y, t.columns.2.z)
+            let ry = atan2(-t.columns.2.x, sqrt(t.columns.2.y*t.columns.2.y + t.columns.2.z*t.columns.2.z))
+            let rz = atan2(t.columns.1.x, t.columns.0.x)
+
+            let fx = frame.intrinsics[0][0]
+            let fy = frame.intrinsics[1][1]
+            let cx = frame.intrinsics[2][0]
+            let cy = frame.intrinsics[2][1]
+            let w  = frame.fullImageSize.width
+            let h  = frame.fullImageSize.height
+
             let pose: [String: Any] = [
                 "image": imgName,
                 "transform": [
-                    "columns": [
-                        [t.columns.0.x, t.columns.0.y, t.columns.0.z, t.columns.0.w],
-                        [t.columns.1.x, t.columns.1.y, t.columns.1.z, t.columns.1.w],
-                        [t.columns.2.x, t.columns.2.y, t.columns.2.z, t.columns.2.w],
-                        [t.columns.3.x, t.columns.3.y, t.columns.3.z, t.columns.3.w]
-                    ]
+                    [t.columns.0.x, t.columns.0.y, t.columns.0.z, t.columns.0.w],
+                    [t.columns.1.x, t.columns.1.y, t.columns.1.z, t.columns.1.w],
+                    [t.columns.2.x, t.columns.2.y, t.columns.2.z, t.columns.2.w],
+                    [t.columns.3.x, t.columns.3.y, t.columns.3.z, t.columns.3.w]
                 ],
-                "intrinsics": [
-                    [frame.intrinsics[0][0], frame.intrinsics[0][1], frame.intrinsics[0][2]],
-                    [frame.intrinsics[1][0], frame.intrinsics[1][1], frame.intrinsics[1][2]],
-                    [frame.intrinsics[2][0], frame.intrinsics[2][1], frame.intrinsics[2][2]]
-                ],
-                "imageSize": [frame.fullImageSize.width, frame.fullImageSize.height]
+                "intrinsics": [fx, fy, cx, cy, w, h]
             ]
             poses.append(pose)
+
+            // CSV for RealityCapture import (filename, position, rotation approx, intrinsics)
+            csvLines.append("\(imgName),\(pos.x),\(pos.y),\(pos.z),\(rx),\(ry),\(rz),\(fx),\(fy),\(cx),\(cy),\(w),\(h)")
+
             progress?(Double(i) / Double(max(1, frames.count)))
         }
 
@@ -382,7 +383,25 @@ final class MeshExporter {
         let jsonData = try JSONSerialization.data(withJSONObject: ["poses": poses], options: .prettyPrinted)
         try jsonData.write(to: jsonURL)
 
-        log.log("Photogrammetry dataset exported: \(frames.count) images + poses to \(folderURL.lastPathComponent)")
+        let csvURL = folderURL.appendingPathComponent("poses_for_RealityCapture.csv")
+        try csvLines.joined(separator: "\n").write(to: csvURL, atomically: true, encoding: .utf8)
+
+        // Simple import instructions
+        let readme = """
+        RealityCapture Import Instructions
+        1. Open RealityCapture
+        2. Import images from this folder
+        3. Use Alignment > Import poses from CSV (poses_for_RealityCapture.csv)
+        4. Or use camera_poses.json for custom scripts
+        5. Run Alignment, then Dense Reconstruction, then Texturing
+        6. Export OBJ/Mesh
+
+        Notes: Rotation is approximate Euler; RealityCapture may refine during alignment.
+        For best results use the LiDAR textured OBJ export in the app instead for on-device results.
+        """
+        try readme.write(to: folderURL.appendingPathComponent("README_RealityCapture.txt"), atomically: true, encoding: .utf8)
+
+        log.log("Photogrammetry + RealityCapture dataset exported: \(frames.count) images + CSV/JSON")
     }
 
     func exportSeamlessTextured(meshData: UnifiedMeshData,
@@ -589,9 +608,7 @@ final class MeshExporter {
                 "\(atlasW)×\(atlasH), \(vtList.count) UVs")
     }
 
-}  // end MeshExporter
-
-// MARK: - BitmapSampler
+}
 
 struct BitmapSampler {
     private let bytes:  [UInt8]
