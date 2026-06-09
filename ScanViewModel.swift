@@ -91,7 +91,8 @@ final class ScanViewModel: ObservableObject {
         let next: CameraMode = cameraMode == .rear ? .front : .rear
         guard next.isSupported else {
             phase = .failed(message: "\(next.rawValue) is not supported on this device.")
-            return }
+            return
+        }
         cameraMode = next
         resetScan()
     }
@@ -138,12 +139,14 @@ final class ScanViewModel: ObservableObject {
         guard now.timeIntervalSince(lastCaptureDate) >= captureInterval else { return }
 
         // Deduplication: only store frames where the camera has moved meaningfully.
+        // This gives dense spatial coverage without wasting memory on static frames.
         let newTransform = arFrame.camera.transform
         if let prev = lastCapturedTransform {
             let dist  = simd_distance(newTransform.columns.3.xyz, prev.columns.3.xyz)
-            let cosA  = simd_dot(normalize(newTransform.columns.2.xyz), normalize(prev.columns.2.xyz))
+            let cosA  = simd_dot(normalize(newTransform.columns.2.xyz),
+                                 normalize(prev.columns.2.xyz))
             let angle = acos(max(-1, min(1, cosA)))
-            guard dist > 0.10 || angle > 0.06 else { return }
+            guard dist > 0.10 || angle > 0.06 else { return }  // 10 cm or ~3.5 deg
         }
         lastCapturedTransform = newTransform
         lastCaptureDate = now
@@ -187,6 +190,8 @@ final class ScanViewModel: ObservableObject {
         vertexCount = v; faceCount = f; tileCount = t
     }
 
+    // MARK: - Export URL helper (nonisolated — safe to call from Task.detached)
+
     nonisolated func makeExportURL(format: ExportFormat) throws -> URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let dir  = docs.appendingPathComponent("LiDARMapper/exports", isDirectory: true)
@@ -196,6 +201,8 @@ final class ScanViewModel: ObservableObject {
         let stamp = iso.string(from: Date()).replacingOccurrences(of: ":", with: "-")
         return dir.appendingPathComponent("scan_\(stamp).\(format.fileExtension)")
     }
+
+    // MARK: - Export
 
     func startExport(withTexture: Bool = true) {
         switch cameraMode {
@@ -211,7 +218,8 @@ final class ScanViewModel: ObservableObject {
 
         guard !anchors.isEmpty else {
             phase = .failed(message: "No mesh data — start scanning first.")
-            return }
+            return
+        }
 
         log.log("Rear export: \(anchors.count) tiles, \(frames.count) frames")
         phase = .exporting(progress: 0)
@@ -222,17 +230,21 @@ final class ScanViewModel: ObservableObject {
 
         Task.detached(priority: .userInitiated) {
             do {
+                // Collect unified mesh (0–25 %)
                 let meshData = exp.collectMeshData(from: anchors) { p in
                     Task { @MainActor in vm.phase = .exporting(progress: p * 0.25) }
                 }
                 Task { @MainActor in vm.phase = .exporting(progress: 0.25) }
 
+                // All three formats export to the same folder with consistent base name
                 let baseURL = try vm.makeExportURL(format: .obj)
 
-                try exp.exportAll(meshData: meshData, frames: frames, baseURL: baseURL) { p, msg in
+                try exp.exportAll(meshData: meshData, frames: frames,
+                                  baseURL: baseURL) { p, msg in
                     Task { @MainActor in vm.phase = .exporting(progress: 0.25 + p * 0.75) }
                 }
 
+                // Share the seamless-textured OBJ as the primary artefact
                 let dir  = baseURL.deletingLastPathComponent()
                 let stem = baseURL.deletingPathExtension().lastPathComponent
                 let texURL = dir.appendingPathComponent(stem + "_textured.obj")
@@ -255,7 +267,8 @@ final class ScanViewModel: ObservableObject {
 
         guard !snapshots.isEmpty else {
             phase = .failed(message: "No face data — start scanning first.")
-            return }
+            return
+        }
 
         log.log("Front export: \(snapshots.count) snapshots, \(frames.count) frames")
         phase = .exporting(progress: 0)
@@ -287,6 +300,8 @@ final class ScanViewModel: ObservableObject {
         logger.log("Export ready: \(url.lastPathComponent)")
     }
 
+    // MARK: - Reset
+
     func resetScan() {
         meshLock.lock(); meshAnchors.removeAll(); meshLock.unlock()
         faceLock.lock(); faceSnapshots.removeAll(); faceLock.unlock()
@@ -313,6 +328,7 @@ struct FaceSnapshot {
         self.textureCoordinates = geo.textureCoordinates
         self.triangleCount      = geo.triangleCount
 
+        // Copy triangle indices safely — iterate the raw pointer directly
         let count = geo.triangleCount * 3
         let ptr   = geo.triangleIndices
         self.triangleIndices = (0..<count).map { ptr[$0] }
