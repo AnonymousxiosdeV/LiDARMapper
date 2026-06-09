@@ -259,7 +259,6 @@ struct ScannerView: View {
                     viewModel.exportFormat = .ply
                     viewModel.startExport(withTexture: false)
                 }
-                // Photogrammetry dataset (images + poses) for external OBJ processing
                 Button("Photogrammetry Dataset (images + poses)") {
                     viewModel.startPhotogrammetryExport()
                 }
@@ -268,7 +267,7 @@ struct ScannerView: View {
         } message: {
             Text(isFrontMode
                  ? "TrueDepth face mesh uses built-in ARKit UV coordinates."
-                 : "OBJ + Texture projects frames onto mesh. Photogrammetry exports raw images + camera poses for external tools to generate OBJ.")
+                 : "OBJ + Texture projects frames onto mesh. Photogrammetry exports raw images + camera poses for external tools (RealityCapture) to generate OBJ. On-device ObjectCapture (RealityKit) available in future update for pure photo reconstruction.")
         }
         .sheet(isPresented: $viewModel.showShareSheet) {
             if let url = viewModel.exportURL {
@@ -435,14 +434,14 @@ struct StatusBanner: View {
         switch phase {
         case .idle:
             return cameraMode == .front
-                ? "TrueDepth ready — tap ▶ Start to scan face"
-                : "Camera ready — tap ▶ Start to scan"
+                ? "TrueDepth ready — move slowly around the object for full coverage"
+                : "Camera ready — move slowly for complete scan. Aim for overlapping views."
         case .scanning:
             return trackingMsg.isEmpty
-                ? (cameraMode == .front ? "Scanning face — hold still" : "Scanning — move slowly")
+                ? (cameraMode == .front ? "Scanning face — hold still, good lighting helps" : "Scanning — slow circular motion, keep 1-2m distance, overlap views 30%+")
                 : trackingMsg
-        case .paused:            return "Paused — tap ▶ Resume or ⬆ Export"
-        case .exporting:         return "Processing mesh…"
+        case .paused:            return "Paused — tap ▶ Resume or ⬆ Export. Check preview for coverage gaps."
+        case .exporting:         return "Processing mesh and texture…"
         case .exported(let url): return "Exported: \(url.lastPathComponent)"
         case .failed(let msg):   return msg
         }
