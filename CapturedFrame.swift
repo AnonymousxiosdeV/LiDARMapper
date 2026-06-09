@@ -1,5 +1,5 @@
 // CapturedFrame.swift — LiDARMapper
-// Higher-res frame capture (0.5 scale instead of 0.25) for better UV texture quality.
+// Higher-res frame capture (0.75 scale) for sharper texture detail.
 
 import ARKit
 import UIKit
@@ -18,10 +18,10 @@ struct CapturedFrame {
 
     private static let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
-    // scale: 0.5 = half-res — good balance of quality vs memory
-    init?(arFrame: ARFrame, scale: CGFloat = 0.50) {
+    // 0.75 scale = better texture sharpness (was 0.5). Memory trade-off acceptable on Pro devices.
+    init?(arFrame: ARFrame, scale: CGFloat = 0.75) {
         guard let image = Self.extractImage(arFrame.capturedImage, scale: scale),
-              let jpeg  = image.jpegData(compressionQuality: 0.75) else { return nil }
+              let jpeg  = image.jpegData(compressionQuality: 0.85) else { return nil }
         self.cameraTransform = arFrame.camera.transform
         self.intrinsics      = arFrame.camera.intrinsics
         self.fullImageSize   = arFrame.camera.imageResolution
@@ -90,9 +90,6 @@ struct TextureAtlas {
         let fw = firstImg.size.width, fh = firstImg.size.height
         let atlasSize = CGSize(width: CGFloat(cols) * fw, height: CGFloat(rows) * fh)
 
-        // Use CGContext instead of UIGraphicsBeginImageContextWithOptions.
-        // CGContext is safe to use from background threads (Task.detached in export).
-        // This fixes potential crashes when building texture atlases during export.
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
         guard let ctx = CGContext(
             data: nil,
@@ -114,7 +111,7 @@ struct TextureAtlas {
         }
 
         guard let cgImage = ctx.makeImage(),
-              let jpegData = UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.90) else {
+              let jpegData = UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.92) else {
             return nil
         }
 
