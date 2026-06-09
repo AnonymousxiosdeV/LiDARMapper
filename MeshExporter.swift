@@ -333,7 +333,7 @@ final class MeshExporter {
         log.log("exportAll complete — geo, textured, PLY")
     }
 
-    // Photogrammetry export with RealityCapture-friendly poses.csv + JSON
+    // Photogrammetry + NeRF/3DGS ready export
     func exportPhotogrammetry(frames: [CapturedFrame],
                               to folderURL: URL,
                               progress: ((Double) -> Void)? = nil) throws {
@@ -349,7 +349,6 @@ final class MeshExporter {
 
             let t = frame.cameraTransform
             let pos = t.columns.3
-            // Approximate rotation from transform (Euler-ish for RC import)
             let rx = atan2(t.columns.2.y, t.columns.2.z)
             let ry = atan2(-t.columns.2.x, sqrt(t.columns.2.y*t.columns.2.y + t.columns.2.z*t.columns.2.z))
             let rz = atan2(t.columns.1.x, t.columns.0.x)
@@ -373,7 +372,6 @@ final class MeshExporter {
             ]
             poses.append(pose)
 
-            // CSV for RealityCapture import (filename, position, rotation approx, intrinsics)
             csvLines.append("\(imgName),\(pos.x),\(pos.y),\(pos.z),\(rx),\(ry),\(rz),\(fx),\(fy),\(cx),\(cy),\(w),\(h)")
 
             progress?(Double(i) / Double(max(1, frames.count)))
@@ -386,22 +384,34 @@ final class MeshExporter {
         let csvURL = folderURL.appendingPathComponent("poses_for_RealityCapture.csv")
         try csvLines.joined(separator: "\n").write(to: csvURL, atomically: true, encoding: .utf8)
 
-        // Simple import instructions
+        // NeRF / 3D Gaussian Splatting ready (nerfstudio, instant-ngp, Luma, etc.)
         let readme = """
-        RealityCapture Import Instructions
-        1. Open RealityCapture
-        2. Import images from this folder
-        3. Use Alignment > Import poses from CSV (poses_for_RealityCapture.csv)
-        4. Or use camera_poses.json for custom scripts
-        5. Run Alignment, then Dense Reconstruction, then Texturing
-        6. Export OBJ/Mesh
+        Photogrammetry + NeRF / 3DGS Pipeline
 
-        Notes: Rotation is approximate Euler; RealityCapture may refine during alignment.
-        For best results use the LiDAR textured OBJ export in the app instead for on-device results.
+        Files:
+        - image_*.jpg : Captured frames
+        - camera_poses.json : Full 4x4 transforms + intrinsics (compatible with many NeRF tools)
+        - poses_for_RealityCapture.csv : For RealityCapture CSV import
+
+        Recommended pipelines for high-quality OBJ:
+        1. RealityCapture (best traditional photogrammetry)
+           - Import images
+           - Import poses CSV
+           - Align → Dense → Texture → Export OBJ
+
+        2. NeRF / 3D Gaussian Splatting (best view-dependent quality)
+           - Use nerfstudio or instant-ngp with the images/ + camera_poses.json
+           - Or upload to Luma AI / Polycam web with custom dataset
+           - Export mesh (OBJ) from the trained model
+
+        3. On-device fast path (this app)
+           - Use "OBJ + Texture" export for immediate textured OBJ (LiDAR mesh + photo projection)
+
+        Note: NeRF training is compute-heavy; best done on desktop GPU. The poses.json is directly usable by most modern pipelines.
         """
-        try readme.write(to: folderURL.appendingPathComponent("README_RealityCapture.txt"), atomically: true, encoding: .utf8)
+        try readme.write(to: folderURL.appendingPathComponent("README_NeRF_RealityCapture.txt"), atomically: true, encoding: .utf8)
 
-        log.log("Photogrammetry + RealityCapture dataset exported: \(frames.count) images + CSV/JSON")
+        log.log("Photogrammetry + NeRF/3DGS + RealityCapture dataset exported")
     }
 
     func exportSeamlessTextured(meshData: UnifiedMeshData,
