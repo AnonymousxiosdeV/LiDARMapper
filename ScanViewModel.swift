@@ -3,8 +3,6 @@
 import ARKit
 import SwiftUI
 
-// MARK: - Camera Mode
-
 enum CameraMode: String, CaseIterable {
     case rear  = "Rear LiDAR"
     case front = "Front TrueDepth"
@@ -24,8 +22,6 @@ enum CameraMode: String, CaseIterable {
     }
 }
 
-// MARK: - Scan Phase
-
 enum ScanPhase: Equatable {
     case idle
     case scanning
@@ -34,8 +30,6 @@ enum ScanPhase: Equatable {
     case exported(url: URL)
     case failed(message: String)
 }
-
-// MARK: - ScanViewModel
 
 @MainActor
 final class ScanViewModel: ObservableObject {
@@ -184,6 +178,49 @@ final class ScanViewModel: ObservableObject {
         }
     }
 
+    // New: Photogrammetry dataset export (images + camera poses for external processing to OBJ)
+    func startPhotogrammetryExport() {
+        let frames = allCapturedFrames()
+        guard !frames.isEmpty else {
+            phase = .failed(message: "No frames captured — scan first.")
+            return
+        }
+        log.log("Starting photogrammetry export: \(frames.count) frames")
+        phase = .exporting(progress: 0)
+
+        let exp    = exporter
+        let logger = log
+        let vm     = self
+
+        Task.detached(priority: .userInitiated) {
+            do {
+                let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                let dir  = docs.appendingPathComponent("LiDARMapper/photogrammetry", isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let iso  = ISO8601DateFormatter()
+                iso.formatOptions = [.withFullDate, .withTime, .withColonSeparatorInTime]
+                let stamp = iso.string(from: Date()).replacingOccurrences(of: ":", with: "-")
+                let folder = dir.appendingPathComponent("pg_\(stamp)")
+
+                try exp.exportPhotogrammetry(frames: frames, to: folder) { p in
+                    Task { @MainActor in vm.phase = .exporting(progress: p) }
+                }
+
+                Task { @MainActor in
+                    vm.exportURL = folder
+                    vm.phase = .exported(url: folder)
+                    vm.showShareSheet = true
+                    logger.log("Photogrammetry dataset ready: \(folder.lastPathComponent)")
+                }
+            } catch {
+                Task { @MainActor in
+                    vm.phase = .failed(message: error.localizedDescription)
+                    logger.error("Photogrammetry export failed: \(error)")
+                }
+            }
+        }
+    }
+
     private func startRearExport(frames: [CapturedFrame]) {
         meshLock.lock()
         let camPos = simd_make_float3(0,0,0)
@@ -283,8 +320,6 @@ final class ScanViewModel: ObservableObject {
         capturedFrameCount = 0; phase = .idle; exportURL = nil
     }
 }
-
-// MARK: - FaceSnapshot
 
 struct FaceSnapshot {
     let transform:          simd_float4x4
