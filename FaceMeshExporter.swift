@@ -1,10 +1,12 @@
 // FaceMeshExporter.swift — LiDARMapper
-// Extension on MeshExporter adding TrueDepth face mesh export.
-// Face texture now correctly aligned with ARKit UVs (no erroneous v-flip; matches captured front-camera image orientation).
+// Face mesh export with corrected texture orientation/alignment for front camera.
+// Texture image is vertically flipped to match OBJ vt convention (v=0 at bottom) and ARKit UVs.
 
 import ARKit
 import simd
 import Foundation
+import UIKit
+import CoreGraphics
 
 extension MeshExporter {
 
@@ -30,7 +32,29 @@ extension MeshExporter {
         if hasTexture, let bestFrame = frames.last {
             texName = baseName + "_face_texture.jpg"
             let texURL = url.deletingLastPathComponent().appendingPathComponent(texName!)
-            try bestFrame.jpegData.write(to: texURL)
+
+            // Correct orientation: vertically flip the texture image so it aligns with OBJ vt (v=0 bottom)
+            guard let srcImg = UIImage(data: bestFrame.jpegData),
+                  let cg = srcImg.cgImage else {
+                try bestFrame.jpegData.write(to: texURL) // fallback
+            }
+            let w = cg.width, h = cg.height
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            guard let ctx = CGContext(data: nil, width: w, height: h,
+                                      bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+                try bestFrame.jpegData.write(to: texURL)
+            }
+            ctx.translateBy(x: 0, y: CGFloat(h))
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            if let flippedCG = ctx.makeImage() {
+                let flippedData = UIImage(cgImage: flippedCG).jpegData(compressionQuality: 0.90) ?? bestFrame.jpegData
+                try flippedData.write(to: texURL)
+            } else {
+                try bestFrame.jpegData.write(to: texURL)
+            }
         }
         progress?(0.20)
 
@@ -73,8 +97,8 @@ extension MeshExporter {
         lines.append("")
         for n in normals    { lines.append("vn \(n.x) \(n.y) \(n.z)") }
         lines.append("")
-        // Use raw ARKit textureCoordinates (no extra flip) so texture lines up correctly with saved face image
-        for uv in snap.textureCoordinates { lines.append("vt \(uv.x) \(uv.y)") }
+        // vt with v-flip to match the corrected (flipped) texture image orientation
+        for uv in snap.textureCoordinates { lines.append("vt \(uv.x) \(1.0 - uv.y)") }
         lines.append("")
         lines.append("usemtl FaceMaterial")
 
