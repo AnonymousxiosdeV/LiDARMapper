@@ -313,6 +313,7 @@ final class MeshExporter {
         progress?(1.0)
         log.log("Coloured PLY done — \(vCount) pts, \(data.count / 1_048_576)MB")
     }
+
     // MARK: - Export All Formats
 
     /// Writes geometry OBJ, seamless-textured OBJ, and coloured PLY in one pass.
@@ -563,7 +564,7 @@ final class MeshExporter {
         ]
         for v in meshData.vertices { lines.append("v \(v.x) \(v.y) \(v.z)") }
         lines.append("")
-        for n in meshData.normals  { lines.append("vn \(n.x) \(n.y) \(n.z)")
+        for n in meshData.normals  { lines.append("vn \(n.x) \(n.y) \(n.z)") }
         lines.append("")
         for uv in vtList           { lines.append("vt \(uv.x) \(uv.y)") }
         lines.append(""); lines.append("usemtl PhotoMesh")
@@ -578,8 +579,7 @@ final class MeshExporter {
                 "\(atlasW)×\(atlasH), \(vtList.count) UVs")
     }
 
-
-}
+}  // end MeshExporter class
 
 // MARK: - BitmapSampler (shared helper for MeshExporter)
 
