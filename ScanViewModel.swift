@@ -52,7 +52,7 @@ final class ScanViewModel: ObservableObject {
     @Published var exportFormat:       ExportFormat = .obj
     @Published var capturedFrameCount: Int          = 0
 
-    static let maxFrames = 300   // safety cap to avoid memory issues on long scans
+    static let maxFrames = 400   // raised for denser coverage
 
     private(set) var meshAnchors  = [UUID: ARMeshAnchor]()
     private let meshLock          = NSLock()
@@ -63,7 +63,7 @@ final class ScanViewModel: ObservableObject {
     private var capturedFrames   = [CapturedFrame]()
     private let framesLock       = NSLock()
     private var lastCaptureDate  = Date.distantPast
-    private let captureInterval: TimeInterval = 0.3   // frequent capture for full coverage
+    private let captureInterval: TimeInterval = 0.20   // denser frames for better texture
     private var lastCapturedTransform: simd_float4x4?  // for deduplication
 
     private var fpsFrames = 0
@@ -126,22 +126,21 @@ final class ScanViewModel: ObservableObject {
         let now = Date()
         guard now.timeIntervalSince(lastCaptureDate) >= captureInterval else { return }
 
-        // Deduplication: only store frames where the camera has moved meaningfully.
-        // This gives dense spatial coverage without wasting memory on static frames.
+        // Slightly relaxed dedup for denser spatial coverage (better textures).
         let newTransform = arFrame.camera.transform
         if let prev = lastCapturedTransform {
             let dist  = simd_distance(newTransform.columns.3.xyz, prev.columns.3.xyz)
             let cosA  = simd_dot(normalize(newTransform.columns.2.xyz),
                                  normalize(prev.columns.2.xyz))
             let angle = acos(max(-1, min(1, cosA)))
-            guard dist > 0.10 || angle > 0.06 else { return }  // 10 cm or ~3.5 deg
+            guard dist > 0.08 || angle > 0.05 else { return }
         }
         lastCapturedTransform = newTransform
         lastCaptureDate = now
 
         Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
-            guard let captured = CapturedFrame(arFrame: arFrame, scale: 0.5) else { return }
+            guard let captured = CapturedFrame(arFrame: arFrame, scale: 0.75) else { return }
             await MainActor.run {
                 self.framesLock.lock()
                 self.capturedFrames.append(captured)
@@ -218,13 +217,11 @@ final class ScanViewModel: ObservableObject {
 
         Task.detached(priority: .userInitiated) {
             do {
-                // Collect unified mesh (0–25 %)
                 let meshData = exp.collectMeshData(from: anchors) { p in
                     Task { @MainActor in vm.phase = .exporting(progress: p * 0.25) }
                 }
                 Task { @MainActor in vm.phase = .exporting(progress: 0.25) }
 
-                // All three formats export to the same folder with consistent base name
                 let baseURL = try vm.makeExportURL(format: .obj)
 
                 try exp.exportAll(meshData: meshData, frames: frames,
@@ -232,7 +229,6 @@ final class ScanViewModel: ObservableObject {
                     Task { @MainActor in vm.phase = .exporting(progress: 0.25 + p * 0.75) }
                 }
 
-                // Share the seamless-textured OBJ as the primary artefact
                 let dir  = baseURL.deletingLastPathComponent()
                 let stem = baseURL.deletingPathExtension().lastPathComponent
                 let texURL = dir.appendingPathComponent(stem + "_textured.obj")
@@ -316,7 +312,6 @@ struct FaceSnapshot {
         self.textureCoordinates = geo.textureCoordinates
         self.triangleCount      = geo.triangleCount
 
-        // Copy triangle indices safely — iterate the raw pointer directly
         let count = geo.triangleCount * 3
         let ptr   = geo.triangleIndices
         self.triangleIndices = (0..<count).map { ptr[$0] }
