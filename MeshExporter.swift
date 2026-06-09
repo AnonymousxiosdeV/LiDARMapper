@@ -65,8 +65,6 @@ final class MeshExporter {
                                faces: allFaces, classifications: allCls)
     }
 
-    // MARK: - Improved angle-weighted normals
-
     private func computeAngleWeightedNormals(vertices: [SIMD3<Float>],
                                              faces: [SIMD3<UInt32>]) -> [SIMD3<Float>] {
         var normals = [SIMD3<Float>](repeating: .zero, count: vertices.count)
@@ -85,8 +83,6 @@ final class MeshExporter {
         }
         return normals.map { n in let l = length(n); return l > 1e-6 ? n/l : SIMD3<Float>(0,1,0) }
     }
-
-    // MARK: - OBJ (no texture)
 
     func exportOBJ(meshData: UnifiedMeshData, to url: URL) throws {
         log.log("Exporting OBJ → \(url.lastPathComponent)")
@@ -114,8 +110,6 @@ final class MeshExporter {
         try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
         log.log("OBJ done")
     }
-
-    // MARK: - OBJ with UV texture projection
 
     func exportOBJTextured(meshData: UnifiedMeshData,
                            frames: [CapturedFrame],
@@ -218,8 +212,6 @@ final class MeshExporter {
         log.log("Textured OBJ done — \(pct)% UV coverage")
     }
 
-    // MARK: - PLY (binary little-endian)
-
     func exportPLY(meshData: UnifiedMeshData, to url: URL) throws {
         log.log("Exporting PLY → \(url.lastPathComponent)")
         let header = "ply\nformat binary_little_endian 1.0\ncomment LiDAR Mapper\nelement vertex \(meshData.vertexCount)\nproperty float x\nproperty float y\nproperty float z\nproperty float nx\nproperty float ny\nproperty float nz\nelement face \(meshData.faceCount)\nproperty list uchar uint vertex_indices\nproperty uchar classification\nend_header\n"
@@ -246,8 +238,6 @@ final class MeshExporter {
         try data.write(to: url, options: .atomic)
         log.log("PLY done — \(data.count / 1_048_576) MB")
     }
-
-    // MARK: - Coloured Point Cloud PLY
 
     func exportColoredPLY(meshData: UnifiedMeshData,
                            frames:   [CapturedFrame],
@@ -315,8 +305,6 @@ final class MeshExporter {
         log.log("Coloured PLY done — \(vCount) pts, \(data.count / 1_048_576)MB")
     }
 
-    // MARK: - Export All Formats
-
     func exportAll(meshData: UnifiedMeshData,
                    frames:   [CapturedFrame],
                    baseURL:  URL,
@@ -353,13 +341,54 @@ final class MeshExporter {
         log.log("exportAll complete — geo, textured, PLY")
     }
 
-    // MARK: - Seamless Photographic Textured OBJ
+    // MARK: - Photogrammetry Export
+    // Saves images + camera poses (transform + intrinsics) for use in external photogrammetry tools
+    // (RealityKit Object Capture, COLMAP, Meshroom, Metashape, etc.)
+    func exportPhotogrammetry(frames: [CapturedFrame],
+                              to folderURL: URL,
+                              progress: ((Double) -> Void)? = nil) throws {
+        try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+
+        var poses: [[String: Any]] = []
+        for (i, frame) in frames.enumerated() {
+            let imgName = String(format: "image_%03d.jpg", i)
+            let imgURL = folderURL.appendingPathComponent(imgName)
+            try frame.jpegData.write(to: imgURL)
+
+            // Camera pose (world transform) and intrinsics for photogrammetry
+            let t = frame.cameraTransform
+            let pose: [String: Any] = [
+                "image": imgName,
+                "transform": [
+                    "columns": [
+                        [t.columns.0.x, t.columns.0.y, t.columns.0.z, t.columns.0.w],
+                        [t.columns.1.x, t.columns.1.y, t.columns.1.z, t.columns.1.w],
+                        [t.columns.2.x, t.columns.2.y, t.columns.2.z, t.columns.2.w],
+                        [t.columns.3.x, t.columns.3.y, t.columns.3.z, t.columns.3.w]
+                    ]
+                ],
+                "intrinsics": [
+                    [frame.intrinsics[0][0], frame.intrinsics[0][1], frame.intrinsics[0][2]],
+                    [frame.intrinsics[1][0], frame.intrinsics[1][1], frame.intrinsics[1][2]],
+                    [frame.intrinsics[2][0], frame.intrinsics[2][1], frame.intrinsics[2][2]]
+                ],
+                "imageSize": [frame.fullImageSize.width, frame.fullImageSize.height]
+            ]
+            poses.append(pose)
+            progress?(Double(i) / Double(max(1, frames.count)))
+        }
+
+        let jsonURL = folderURL.appendingPathComponent("camera_poses.json")
+        let jsonData = try JSONSerialization.data(withJSONObject: ["poses": poses], options: .prettyPrinted)
+        try jsonData.write(to: jsonURL)
+
+        log.log("Photogrammetry dataset exported: \(frames.count) images + poses to \(folderURL.lastPathComponent)")
+    }
 
     func exportSeamlessTextured(meshData: UnifiedMeshData,
                                  frames:   [CapturedFrame],
                                  to url:   URL,
                                  progress: ((Double) -> Void)? = nil) throws {
-
         guard !frames.isEmpty else {
             try exportOBJ(meshData: meshData, to: url); progress?(1.0); return
         }
@@ -464,7 +493,6 @@ final class MeshExporter {
         }
         progress?(0.62)
 
-        // Create atlas with correct orientation (vertical flip so UVs align)
         let sp = CGColorSpaceCreateDeviceRGB()
         guard let cgCtx = CGContext(data: &px, width: atlasW, height: atlasH,
                                     bitsPerComponent: 8, bytesPerRow: atlasW * 4,
@@ -474,7 +502,6 @@ final class MeshExporter {
             throw NSError(domain: "MeshExporter", code: 3, userInfo: [NSLocalizedDescriptionKey: "Atlas CGContext failed"])
         }
 
-        // Flip vertically for correct orientation matching the 1-v UV calc
         let size = CGSize(width: atlasW, height: atlasH)
         UIGraphicsBeginImageContextWithOptions(size, true, 1)
         let ctx2 = UIGraphicsGetCurrentContext()!
