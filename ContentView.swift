@@ -124,7 +124,6 @@ struct ScannerView: View {
         if case .exporting = viewModel.phase { return true }; return false
     }
     private var isFrontMode: Bool { viewModel.cameraMode == .front }
-    // ✅ Was missing from ScannerView — only existed on ControlBar, causing a compile error
     private var isScanning: Bool {
         if case .scanning = viewModel.phase { return true }; return false
     }
@@ -164,7 +163,6 @@ struct ScannerView: View {
                         Button {
                             coordinator.pauseSession()
                             viewModel.switchCamera()
-                            // Restart preview in new mode after brief delay
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                                 coordinator.startCameraOnly(mode: viewModel.cameraMode)
                             }
@@ -191,7 +189,6 @@ struct ScannerView: View {
                     TrackingBanner(message: viewModel.trackingMsg).padding(.top, 6)
                 }
 
-                // Front camera scanning tip
                 if isFrontMode {
                     Text("Point front camera at your face • Stay still for best results")
                         .font(.system(size: 11, weight: .medium))
@@ -203,7 +200,6 @@ struct ScannerView: View {
 
                 Spacer()
 
-                // Mini live model preview — only shown during rear LiDAR scanning
                 if isScanning && viewModel.cameraMode == .rear && viewModel.tileCount > 0 {
                     HStack {
                         Spacer()
@@ -216,6 +212,24 @@ struct ScannerView: View {
                 if isExportingPhase {
                     ExportProgressView(progress: exportProgress)
                         .padding(.horizontal, 16).padding(.bottom, 8)
+                }
+
+                // Runtime LiDAR distance control (improved UI)
+                if isScanning && viewModel.cameraMode == .rear {
+                    VStack(spacing: 4) {
+                        HStack {
+                            Text("Max Distance")
+                                .font(.system(size: 11)).foregroundStyle(.white.opacity(0.7))
+                            Spacer()
+                            Text(String(format: "%.1f m", viewModel.maxScanDistance))
+                                .font(.system(size: 11, design: .monospaced)).foregroundStyle(.cyan)
+                        }
+                        Slider(value: $viewModel.maxScanDistance, in: 1...10, step: 0.5)
+                            .tint(.cyan)
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .padding(.horizontal, 14).padding(.bottom, 8)
                 }
 
                 StatusBanner(phase: viewModel.phase,
@@ -231,19 +245,16 @@ struct ScannerView: View {
         }
         .preferredColorScheme(.dark)
         .statusBarHidden(true)
-        // ✅ Use the non-deprecated iOS 17 two-parameter form
         .onChange(of: isErrorPhase) { _, newValue in showErrorAlert = newValue }
         .alert("Error", isPresented: $showErrorAlert) {
             Button("OK", role: .cancel) { viewModel.phase = .idle }
         } message: { Text(errorMessage) }
-        // Export options — adapt to camera mode
         .confirmationDialog(
             isFrontMode ? "Export Face Scan" : "Export LiDAR Scan",
             isPresented: $showExportSheet,
             titleVisibility: .visible
         ) {
             if isFrontMode {
-                // Front camera — face mesh always exports as OBJ with built-in UVs
                 Button("OBJ + Texture (\(viewModel.capturedFrameCount) frames)") {
                     viewModel.startExport(withTexture: true)
                 }
@@ -251,7 +262,6 @@ struct ScannerView: View {
                     viewModel.startExport(withTexture: false)
                 }
             } else {
-                // Rear LiDAR
                 Button("OBJ + Texture (\(viewModel.capturedFrameCount) frames)") {
                     viewModel.exportFormat = .obj
                     viewModel.startExport(withTexture: true)
