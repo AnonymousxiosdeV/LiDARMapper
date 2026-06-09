@@ -2,7 +2,6 @@
 
 import ARKit
 import SwiftUI
-import LocalAuthentication
 
 // MARK: - Camera Mode
 
@@ -74,23 +73,6 @@ final class ScanViewModel: ObservableObject {
     let log = AppLogger.shared
     nonisolated let exporter = MeshExporter()
 
-    // Face ID auth before face scan (privacy)
-    private func authenticateWithFaceID() async -> Bool {
-        let context = LAContext()
-        var error: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error),
-              context.biometryType == .faceID else { return false }
-
-        do {
-            let reason = "Authenticate with Face ID to start face scanning and mesh export."
-            try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)
-            return true
-        } catch {
-            phase = .failed(message: "Face ID authentication failed or cancelled.")
-            return false
-        }
-    }
-
     func switchCamera() {
         guard phase == .idle || phase == .paused else { return }
         let next: CameraMode = cameraMode == .rear ? .front : .rear
@@ -98,18 +80,6 @@ final class ScanViewModel: ObservableObject {
             phase = .failed(message: "\(next.rawValue) is not supported on this device.")
             return
         }
-
-        if next == .front {
-            Task {
-                let ok = await authenticateWithFaceID()
-                if ok {
-                    cameraMode = next
-                    resetScan()
-                }
-            }
-            return
-        }
-
         cameraMode = next
         resetScan()
     }
