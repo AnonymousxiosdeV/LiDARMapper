@@ -61,7 +61,6 @@ final class ScanViewModel: ObservableObject {
     private let captureInterval: TimeInterval = 0.20
     private var lastCapturedTransform: simd_float4x4?
 
-    // Dedicated live front camera frame for face texture (ensures front camera image, not back)
     private var faceTextureFrame: CapturedFrame?
 
     private var fpsFrames = 0
@@ -100,11 +99,6 @@ final class ScanViewModel: ObservableObject {
         vertexCount = snap.vertices.count
         faceCount   = snap.triangleCount
         tileCount   = 1
-
-        // Capture live front camera image for accurate face texture
-        if let currentFrame = /* provided by coordinator or last ARFrame */ nil {
-            // Will be set from AR delegate
-        }
     }
     func faceAnchorUpdated(_ anchor: ARFaceAnchor) {
         let snap = FaceSnapshot(anchor: anchor)
@@ -138,7 +132,6 @@ final class ScanViewModel: ObservableObject {
             await MainActor.run {
                 self.framesLock.lock()
                 if self.cameraMode == .front {
-                    // Keep only the latest front camera frame for face texture
                     self.faceTextureFrame = captured
                 } else {
                     self.capturedFrames.append(captured)
@@ -193,6 +186,48 @@ final class ScanViewModel: ObservableObject {
         switch cameraMode {
         case .rear:  startRearExport(frames: withTexture ? allCapturedFrames() : [])
         case .front: startFrontExport(frames: withTexture ? (currentFaceTextureFrame() != nil ? [currentFaceTextureFrame()!] : allCapturedFrames()) : [])
+        }
+    }
+
+    func startPhotogrammetryExport() {
+        let frames = allCapturedFrames()
+        guard !frames.isEmpty else {
+            phase = .failed(message: "No frames captured — scan first.")
+            return
+        }
+        log.log("Starting photogrammetry export: \(frames.count) frames")
+        phase = .exporting(progress: 0)
+
+        let exp    = exporter
+        let logger = log
+        let vm     = self
+
+        Task.detached(priority: .userInitiated) {
+            do {
+                let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                let dir  = docs.appendingPathComponent("LiDARMapper/photogrammetry", isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let iso  = ISO8601DateFormatter()
+                iso.formatOptions = [.withFullDate, .withTime, .withColonSeparatorInTime]
+                let stamp = iso.string(from: Date()).replacingOccurrences(of: ":", with: "-")
+                let folder = dir.appendingPathComponent("pg_\(stamp)")
+
+                try exp.exportPhotogrammetry(frames: frames, to: folder) { p in
+                    Task { @MainActor in vm.phase = .exporting(progress: p) }
+                }
+
+                Task { @MainActor in
+                    vm.exportURL = folder
+                    vm.phase = .exported(url: folder)
+                    vm.showShareSheet = true
+                    logger.log("Photogrammetry dataset ready: \(folder.lastPathComponent)")
+                }
+            } catch {
+                Task { @MainActor in
+                    vm.phase = .failed(message: error.localizedDescription)
+                    logger.error("Photogrammetry export failed: \(error)")
+                }
+            }
         }
     }
 
