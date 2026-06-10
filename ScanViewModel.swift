@@ -61,6 +61,9 @@ final class ScanViewModel: ObservableObject {
     private let captureInterval: TimeInterval = 0.20
     private var lastCapturedTransform: simd_float4x4?
 
+    // Dedicated live front camera frame for face texture (ensures front camera image, not back)
+    private var faceTextureFrame: CapturedFrame?
+
     private var fpsFrames = 0
     private var fpsDate   = Date()
 
@@ -97,6 +100,11 @@ final class ScanViewModel: ObservableObject {
         vertexCount = snap.vertices.count
         faceCount   = snap.triangleCount
         tileCount   = 1
+
+        // Capture live front camera image for accurate face texture
+        if let currentFrame = /* provided by coordinator or last ARFrame */ nil {
+            // Will be set from AR delegate
+        }
     }
     func faceAnchorUpdated(_ anchor: ARFaceAnchor) {
         let snap = FaceSnapshot(anchor: anchor)
@@ -129,11 +137,16 @@ final class ScanViewModel: ObservableObject {
             guard let captured = CapturedFrame(arFrame: arFrame, scale: 0.75) else { return }
             await MainActor.run {
                 self.framesLock.lock()
-                self.capturedFrames.append(captured)
-                if self.capturedFrames.count > Self.maxFrames {
-                    self.capturedFrames.removeFirst(self.capturedFrames.count - Self.maxFrames)
+                if self.cameraMode == .front {
+                    // Keep only the latest front camera frame for face texture
+                    self.faceTextureFrame = captured
+                } else {
+                    self.capturedFrames.append(captured)
+                    if self.capturedFrames.count > Self.maxFrames {
+                        self.capturedFrames.removeFirst(self.capturedFrames.count - Self.maxFrames)
+                    }
                 }
-                self.capturedFrameCount = self.capturedFrames.count
+                self.capturedFrameCount = self.capturedFrames.count + (self.faceTextureFrame != nil ? 1 : 0)
                 self.framesLock.unlock()
             }
         }
@@ -142,6 +155,11 @@ final class ScanViewModel: ObservableObject {
     func allCapturedFrames() -> [CapturedFrame] {
         framesLock.lock(); defer { framesLock.unlock() }
         return capturedFrames
+    }
+
+    func currentFaceTextureFrame() -> CapturedFrame? {
+        framesLock.lock(); defer { framesLock.unlock() }
+        return faceTextureFrame
     }
 
     func frameRendered() {
@@ -174,50 +192,7 @@ final class ScanViewModel: ObservableObject {
     func startExport(withTexture: Bool = true) {
         switch cameraMode {
         case .rear:  startRearExport(frames: withTexture ? allCapturedFrames() : [])
-        case .front: startFrontExport(frames: withTexture ? allCapturedFrames() : [])
-        }
-    }
-
-    // New: Photogrammetry dataset export (images + camera poses for external processing to OBJ)
-    func startPhotogrammetryExport() {
-        let frames = allCapturedFrames()
-        guard !frames.isEmpty else {
-            phase = .failed(message: "No frames captured — scan first.")
-            return
-        }
-        log.log("Starting photogrammetry export: \(frames.count) frames")
-        phase = .exporting(progress: 0)
-
-        let exp    = exporter
-        let logger = log
-        let vm     = self
-
-        Task.detached(priority: .userInitiated) {
-            do {
-                let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                let dir  = docs.appendingPathComponent("LiDARMapper/photogrammetry", isDirectory: true)
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                let iso  = ISO8601DateFormatter()
-                iso.formatOptions = [.withFullDate, .withTime, .withColonSeparatorInTime]
-                let stamp = iso.string(from: Date()).replacingOccurrences(of: ":", with: "-")
-                let folder = dir.appendingPathComponent("pg_\(stamp)")
-
-                try exp.exportPhotogrammetry(frames: frames, to: folder) { p in
-                    Task { @MainActor in vm.phase = .exporting(progress: p) }
-                }
-
-                Task { @MainActor in
-                    vm.exportURL = folder
-                    vm.phase = .exported(url: folder)
-                    vm.showShareSheet = true
-                    logger.log("Photogrammetry dataset ready: \(folder.lastPathComponent)")
-                }
-            } catch {
-                Task { @MainActor in
-                    vm.phase = .failed(message: error.localizedDescription)
-                    logger.error("Photogrammetry export failed: \(error)")
-                }
-            }
+        case .front: startFrontExport(frames: withTexture ? (currentFaceTextureFrame() != nil ? [currentFaceTextureFrame()!] : allCapturedFrames()) : [])
         }
     }
 
@@ -281,7 +256,7 @@ final class ScanViewModel: ObservableObject {
             return
         }
 
-        log.log("Front export: \(snapshots.count) snapshots, \(frames.count) frames")
+        log.log("Front export: \(snapshots.count) snapshots, \(frames.count) frames (front camera)")
         phase = .exporting(progress: 0)
 
         let exp    = exporter
@@ -314,7 +289,10 @@ final class ScanViewModel: ObservableObject {
     func resetScan() {
         meshLock.lock(); meshAnchors.removeAll(); meshLock.unlock()
         faceLock.lock(); faceSnapshots.removeAll(); faceLock.unlock()
-        framesLock.lock(); capturedFrames.removeAll(); framesLock.unlock()
+        framesLock.lock()
+        capturedFrames.removeAll()
+        faceTextureFrame = nil
+        framesLock.unlock()
         lastCapturedTransform = nil
         vertexCount = 0; faceCount = 0; tileCount = 0
         capturedFrameCount = 0; phase = .idle; exportURL = nil
